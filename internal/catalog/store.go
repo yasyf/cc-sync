@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,14 +24,22 @@ const (
 	lockTimeout   = 30 * time.Second
 )
 
-// Readiness reasons recorded for a relayed checkpoint that is not ready.
+// Readiness reasons recorded for a relayed checkpoint that is not ready: its
+// artifact closure is incomplete, its code was never verified, or its code
+// lacks prerequisites only an origin fetch can supply.
 const (
-	MissingClosure = "artifact-closure"
-	MissingCode    = "code-unverified"
+	MissingClosure       = "artifact-closure"
+	MissingCode          = "code-unverified"
+	MissingPrerequisites = "prerequisites-missing"
 )
 
-// ErrExpired reports a recorded checkpoint that expired before retention.
-var ErrExpired = errors.New("catalog: checkpoint already expired")
+var (
+	// ErrExpired reports a recorded checkpoint that expired before retention.
+	ErrExpired = errors.New("catalog: checkpoint already expired")
+	// ErrOriginBlockConflict refuses a change carrying an origin block at a
+	// revision this host already holds with different content.
+	ErrOriginBlockConflict = errors.New("catalog: origin-block-conflict")
+)
 
 // Readiness is a relayed checkpoint's local pick-up state. A host's own
 // checkpoints are always ready.
@@ -40,14 +49,15 @@ type Readiness struct {
 	Deferred string   `json:"deferred,omitempty"`
 }
 
-// Evidence is what a receiver established before applying a change: the
-// roots whose closures its store holds, and code verdicts by checkpoint ID.
+// Evidence is what a receiver established before settling checkpoints: the
+// roots whose artifact closures its store holds, and code verdicts by
+// checkpoint ID.
 type Evidence struct {
 	Roots    map[artifact.Digest]bool
 	Verified map[string]Readiness
 }
 
-// Snapshot is a read-only view of the catalog.
+// Snapshot is a read-only view of the catalog as of this host's clock.
 type Snapshot struct {
 	Self      string
 	Origins   []Origin
@@ -62,8 +72,8 @@ func (s Snapshot) ReadinessOf(origin, id string) Readiness {
 	return s.Readiness[id]
 }
 
-// Exported is one export: the ready payload, its canonical bytes, and the
-// source revision those bytes carry.
+// Exported is one export: the payload, its canonical bytes, and the source
+// revision those bytes carry.
 type Exported struct {
 	Payload  Payload
 	Data     []byte
@@ -85,9 +95,17 @@ type Store struct {
 	now  func() time.Time
 }
 
-type ledger struct {
+type fence struct {
+	Origin   string `json:"origin"`
 	Revision uint64 `json:"revision"`
 	Digest   string `json:"digest"`
+}
+
+type ledger struct {
+	Revision uint64    `json:"revision"`
+	Digest   string    `json:"digest"`
+	Roots    string    `json:"roots"`
+	AsOf     time.Time `json:"as_of"`
 }
 
 type state struct {
@@ -95,6 +113,8 @@ type state struct {
 	Version   uint64                `json:"version"`
 	Self      string                `json:"self"`
 	Origins   []Origin              `json:"origins"`
+	Relays    []Origin              `json:"relays"`
+	Fences    []fence               `json:"fences"`
 	Readiness map[string]Readiness  `json:"readiness"`
 	Receipts  []syncservice.Receipt `json:"receipts"`
 	Export    ledger                `json:"export"`
@@ -113,6 +133,22 @@ func (st state) Validate() error {
 	if err := validateOrigins(st.Origins); err != nil {
 		return err
 	}
+	if err := validateOrigins(st.Relays); err != nil {
+		return fmt.Errorf("relays: %w", err)
+	}
+	if err := strictlyIncreasing(st.Fences, func(f fence) string { return f.Origin }); err != nil {
+		return fmt.Errorf("fences: %w", err)
+	}
+	for _, o := range st.Origins {
+		if f, ok := findFence(st.Fences, o.Origin); o.Origin != st.Self && (!ok || f.Revision != o.Revision) {
+			return fmt.Errorf("%w: held block %s revision %d is not fenced", ErrInvalid, o.Origin, o.Revision)
+		}
+	}
+	for _, r := range st.Relays {
+		if f, ok := findFence(st.Fences, r.Origin); r.Origin == st.Self || !ok || r.Revision > f.Revision {
+			return fmt.Errorf("%w: relayed block %s revision %d is past its fence", ErrInvalid, r.Origin, r.Revision)
+		}
+	}
 	relayed := st.relayedIDs()
 	for id := range st.Readiness {
 		if !relayed[id] {
@@ -122,31 +158,41 @@ func (st state) Validate() error {
 	if err := strictlyIncreasing(st.Receipts, func(r syncservice.Receipt) string { return r.Origin }); err != nil {
 		return fmt.Errorf("receipts: %w", err)
 	}
-	if (st.Export.Revision == 0) != (st.Export.Digest == "") {
-		return fmt.Errorf("%w: export ledger revision %d digest %q", ErrInvalid, st.Export.Revision, st.Export.Digest)
+	if e := st.Export; (e.Revision == 0) != (e.Digest == "") || (e.Revision == 0) != e.AsOf.IsZero() {
+		return fmt.Errorf("%w: export ledger revision %d digest %q as of %s", ErrInvalid, e.Revision, e.Digest, e.AsOf)
 	}
 	return nil
 }
 
 // Load reads the catalog without locking; rename-atomic writes keep it
-// consistent.
+// consistent. Checkpoints and tombstones expired by this host's clock are
+// hidden.
 func (s *Store) Load() (Snapshot, error) {
 	st, err := s.read()
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Self: st.Self, Origins: st.Origins, Readiness: st.Readiness}, nil
+	now := s.now().UTC()
+	origins := make([]Origin, 0, len(st.Origins))
+	for _, o := range st.Origins {
+		origins = append(origins, expired(o, now))
+	}
+	return Snapshot{Self: st.Self, Origins: origins, Readiness: st.Readiness}, nil
 }
 
 // Record adds or replaces cp in this host's block under worktree wt, applies
-// retention to that worktree, clears any tombstone for it, and bumps the
-// block revision. It derives the checkpoint's ID, expiry, and classes and
-// returns the checkpoint as retained.
+// retention to that worktree, and clears any tombstone for it, moving the
+// block revision only when the block changes. It derives the checkpoint's
+// ID, expiry, and classes and returns the checkpoint as retained.
 func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpoint, error) {
 	cp = normalized(s.self, wt.ID, cp)
 	var recorded Checkpoint
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
 		own := st.ensure(s.self)
+		before, err := digestJSON(*own)
+		if err != nil {
+			return false, err
+		}
 		i, found := findWorktree(own.Worktrees, wt.ID)
 		if !found {
 			own.Worktrees = slices.Insert(own.Worktrees, i, Worktree{ID: wt.ID})
@@ -166,7 +212,11 @@ func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpo
 		}
 		recorded = w.Checkpoints[j]
 		own.Tombstones = slices.DeleteFunc(own.Tombstones, func(t Tombstone) bool { return t.ID == wt.ID })
-		own.Revision++
+		after, err := digestJSON(*own)
+		if err != nil || after == before {
+			return false, err
+		}
+		own.Revision = nextRevision(own.Revision, now)
 		return true, nil
 	})
 	return recorded, err
@@ -183,17 +233,17 @@ func (s *Store) Remove(ctx context.Context, id string) error {
 		if !found {
 			return false, nil
 		}
-		own.Revision++
+		own.Revision = nextRevision(own.Revision, now)
 		own.tombstone(own.Worktrees[i], now)
 		own.Worktrees = slices.Delete(own.Worktrees, i, i+1)
 		return true, nil
 	})
 }
 
-// GC applies retention to this host's block, bumping its revision and
-// tombstoning emptied worktrees when anything changes; drops expired
-// checkpoints and tombstones from relayed blocks without touching their
-// revisions; and forgets relayed blocks left with nothing to fence.
+// GC applies retention to this host's block, moving its revision and
+// tombstoning emptied worktrees when anything changes. Relayed blocks are
+// never edited: a held or relayed block is forgotten once every checkpoint
+// and tombstone in it has expired here, and its fence is kept.
 func (s *Store) GC(ctx context.Context) (GCResult, error) {
 	var res GCResult
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
@@ -202,18 +252,13 @@ func (s *Store) GC(ctx context.Context) (GCResult, error) {
 			return false, err
 		}
 		total := st.count()
-		kept := st.Origins[:0]
-		for _, o := range st.Origins {
-			if o.Origin == s.self {
-				o = retainOwn(o, now)
-			} else if o = expired(o, now); len(o.Worktrees) == 0 && len(o.Tombstones) == 0 {
-				continue
-			}
-			kept = append(kept, o)
+		st.Origins = slices.DeleteFunc(st.Origins, func(o Origin) bool { return o.Origin != st.Self && lapsed(o, now) })
+		if own, ok := st.block(st.Self); ok {
+			*own = retainOwn(*own, now)
 		}
-		st.Origins = kept
+		st.Relays = slices.DeleteFunc(st.Relays, func(o Origin) bool { return lapsed(o, now) })
 		st.pruneReadiness()
-		res = GCResult{Removed: total - st.count(), Ready: st.ready(), Roots: st.roots()}
+		res = GCResult{Removed: total - st.count(), Ready: st.ready(now), Roots: st.roots(now)}
 		after, err := durable.Marshal(*st)
 		if err != nil {
 			return false, err
@@ -223,20 +268,25 @@ func (s *Store) GC(ctx context.Context) (GCResult, error) {
 	return res, err
 }
 
-// Export returns the payload of every ready, unexpired checkpoint, bumping
-// the source revision exactly when the payload's digest changes.
+// Export returns this host's block and every relayed block, verbatim. The
+// source revision moves to max(previous+1, now in Unix microseconds), and
+// AsOf to now, exactly when the blocks or the roots they derive change.
 func (s *Store) Export(ctx context.Context) (Exported, error) {
 	var out Exported
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
-		p := st.exportable(now)
-		data, err := Encode(p)
+		p := st.exportable()
+		body, roots, err := exportDigests(p, now)
 		if err != nil {
 			return false, err
 		}
-		digest := digestOf(data)
-		changed := digest != st.Export.Digest
+		changed := body != st.Export.Digest || roots != st.Export.Roots
 		if changed {
-			st.Export = ledger{Revision: st.Export.Revision + 1, Digest: digest}
+			st.Export = ledger{Revision: nextRevision(st.Export.Revision, now), Digest: body, Roots: roots, AsOf: now}
+		}
+		p.AsOf = st.Export.AsOf
+		data, err := Encode(p)
+		if err != nil {
+			return false, err
 		}
 		out = Exported{Payload: p, Data: data, Revision: st.Export.Revision}
 		return changed, nil
@@ -244,17 +294,17 @@ func (s *Store) Export(ctx context.Context) (Exported, error) {
 	return out, err
 }
 
-// Digest returns the digest of the payload Export would produce now.
+// Digest returns the digest of the blocks and roots Export would carry now.
 func (s *Store) Digest() (string, error) {
 	st, err := s.read()
 	if err != nil {
 		return "", err
 	}
-	data, err := Encode(st.exportable(s.now().UTC()))
+	body, roots, err := exportDigests(st.exportable(), s.now().UTC())
 	if err != nil {
 		return "", err
 	}
-	return digestOf(data), nil
+	return digestOf([]byte(body + roots)), nil
 }
 
 // Fence decides change against the receipt held for its origin, without
@@ -267,23 +317,43 @@ func (s *Store) Fence(change syncservice.ChangeEnvelope) (syncservice.FenceDecis
 	return syncservice.Fence(st.receipt(change.Origin), change)
 }
 
-// Unverified returns the relayed checkpoints of p that applying it now would
-// record and that are not yet ready here.
+// Unverified returns the unexpired checkpoints of the relayed blocks that
+// applying p would hold and that are not yet ready here. It refuses p with
+// ErrOriginBlockConflict exactly when Apply would.
 func (s *Store) Unverified(p Payload) ([]Checkpoint, error) {
 	st, err := s.read()
 	if err != nil {
 		return nil, err
 	}
-	return slices.DeleteFunc(st.merge(p, s.now().UTC()), func(cp Checkpoint) bool { return st.Readiness[cp.ID].Ready }), nil
+	admitted, err := st.admit(p)
+	if err != nil {
+		return nil, err
+	}
+	return st.unready(admitted, s.now().UTC()), nil
 }
 
-// Apply merges p, the decoded payload of change, under the change's fence:
-// per origin, an older revision is ignored, a newer one replaces the block,
-// and an equal one unions it. Each recorded checkpoint is ready only when
-// its root is in ev.Roots and its code verdict is ready. The change is
-// acknowledged, and its receipt persisted, only when every root it carries
-// is present and every recorded checkpoint is ready; otherwise the merge is
-// kept and the result is Partial with the prior receipt.
+// Pending returns every unexpired held relayed checkpoint not yet ready
+// here: what background verification still has to settle.
+func (s *Store) Pending() ([]Checkpoint, error) {
+	st, err := s.read()
+	if err != nil {
+		return nil, err
+	}
+	held := slices.DeleteFunc(slices.Clone(st.Origins), func(o Origin) bool { return o.Origin == st.Self })
+	return st.unready(held, s.now().UTC()), nil
+}
+
+// Apply merges p, the decoded payload of change, under the change's fence.
+// Per relayed origin, a block older than its fence is ignored, a newer one
+// replaces the held block verbatim, and an equal one must match the fenced
+// digest or the change is refused with ErrOriginBlockConflict and nothing is
+// recorded. A held checkpoint is ready only when its root closure is in
+// ev.Roots and its code verdict is ready; a held block becomes the relayed
+// one once every unexpired root in it is closure-complete, verified or not.
+// The change is acknowledged, and its receipt persisted, only when every
+// root it carries is closure-complete and every unexpired held checkpoint it
+// carries is ready; otherwise the merge is kept and the result is Partial
+// with the prior receipt.
 func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p Payload, ev Evidence) (syncservice.ApplyResult, error) {
 	var res syncservice.ApplyResult
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
@@ -296,27 +366,35 @@ func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p 
 			res = fenced
 			return false, nil
 		}
-		complete := true
-		for _, o := range p.Origins {
-			for _, w := range o.Worktrees {
-				for _, cp := range w.Checkpoints {
-					complete = complete && ev.Roots[cp.Root.Digest]
-				}
-			}
+		admitted, err := st.admit(p)
+		if err != nil {
+			return false, err
 		}
-		for _, cp := range st.merge(p, now) {
-			r := st.Readiness[cp.ID]
-			switch v, verified := ev.Verified[cp.ID]; {
-			case !ev.Roots[cp.Root.Digest]:
-				r = Readiness{Missing: []string{MissingClosure}}
-			case r.Ready:
-			case verified:
-				r = v
-			default:
-				r = Readiness{Missing: []string{MissingCode}}
+		carried := make(map[artifact.Digest]bool, len(change.Artifacts))
+		complete := true
+		for _, root := range change.Artifacts {
+			carried[root.Digest] = true
+			complete = complete && ev.Roots[root.Digest]
+		}
+		for _, in := range admitted {
+			if err := st.hold(in); err != nil {
+				return false, err
 			}
-			st.Readiness[cp.ID] = r
-			complete = complete && r.Ready
+			for _, cp := range live(in, now) {
+				r := st.Readiness[cp.ID]
+				switch v, verified := ev.Verified[cp.ID]; {
+				case r.Ready:
+				case !ev.Roots[cp.Root.Digest]:
+					r = Readiness{Missing: []string{MissingClosure}}
+				case verified:
+					r = v
+				default:
+					r = Readiness{Missing: []string{MissingCode}}
+				}
+				st.Readiness[cp.ID] = r
+				complete = complete && (r.Ready || !carried[cp.Root.Digest])
+			}
+			st.promote(in.Origin, ev.Roots, now)
 		}
 		st.pruneReadiness()
 		if !complete {
@@ -331,6 +409,34 @@ func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p 
 		return true, nil
 	})
 	return res, err
+}
+
+// Settle records background verdicts for held relayed checkpoints not yet
+// ready and relays every held block whose unexpired roots are now all
+// closure-complete.
+func (s *Store) Settle(ctx context.Context, ev Evidence) error {
+	return s.update(ctx, func(st *state, now time.Time) (bool, error) {
+		before, err := durable.Marshal(*st)
+		if err != nil {
+			return false, err
+		}
+		for _, o := range st.Origins {
+			if o.Origin == st.Self {
+				continue
+			}
+			for _, cp := range live(o, now) {
+				if v, ok := ev.Verified[cp.ID]; ok && !st.Readiness[cp.ID].Ready {
+					st.Readiness[cp.ID] = v
+				}
+			}
+			st.promote(o.Origin, ev.Roots, now)
+		}
+		after, err := durable.Marshal(*st)
+		if err != nil {
+			return false, err
+		}
+		return !bytes.Equal(before, after), nil
+	})
 }
 
 func (s *Store) update(ctx context.Context, fn func(st *state, now time.Time) (bool, error)) (err error) {
@@ -385,8 +491,20 @@ func normalized(origin, worktreeID string, cp Checkpoint) Checkpoint {
 	return cp
 }
 
+func nextRevision(prev uint64, now time.Time) uint64 {
+	return max(prev+1, uint64(now.UnixMicro()))
+}
+
 func searchOrigin(origins []Origin, name string) (int, bool) {
 	return slices.BinarySearchFunc(origins, name, func(o Origin, name string) int { return strings.Compare(o.Origin, name) })
+}
+
+func findFence(fences []fence, origin string) (fence, bool) {
+	i, found := slices.BinarySearchFunc(fences, origin, func(f fence, origin string) int { return strings.Compare(f.Origin, origin) })
+	if !found {
+		return fence{}, false
+	}
+	return fences[i], true
 }
 
 func (st *state) block(origin string) (*Origin, bool) {
@@ -395,6 +513,14 @@ func (st *state) block(origin string) (*Origin, bool) {
 		return nil, false
 	}
 	return &st.Origins[i], true
+}
+
+func (st *state) relay(origin string) (Origin, bool) {
+	i, found := searchOrigin(st.Relays, origin)
+	if !found {
+		return Origin{}, false
+	}
+	return st.Relays[i], true
 }
 
 func (st *state) ensure(origin string) *Origin {
@@ -435,7 +561,7 @@ func retainOwn(o Origin, now time.Time) Origin {
 	if !changed && len(tombstones) == len(o.Tombstones) {
 		return o
 	}
-	o.Revision++
+	o.Revision = nextRevision(o.Revision, now)
 	o.Worktrees, o.Tombstones = worktrees, tombstones
 	for _, w := range emptied {
 		o.tombstone(w, now)
@@ -454,91 +580,126 @@ func expired(o Origin, now time.Time) Origin {
 	return o
 }
 
+func lapsed(o Origin, now time.Time) bool {
+	o = expired(o, now)
+	return len(o.Worktrees) == 0 && len(o.Tombstones) == 0
+}
+
+func live(o Origin, now time.Time) []Checkpoint {
+	cps := make([]Checkpoint, 0, len(o.Worktrees))
+	for _, w := range o.Worktrees {
+		cps = append(cps, unexpired(w.Checkpoints, now)...)
+	}
+	return cps
+}
+
 func liveTombstones(tombstones []Tombstone, now time.Time) []Tombstone {
 	return slices.DeleteFunc(slices.Clone(tombstones), func(t Tombstone) bool { return !now.Before(t.ExpiresAt) })
 }
 
-func (st *state) merge(p Payload, now time.Time) []Checkpoint {
-	var recorded []Checkpoint
+func (st *state) admit(p Payload) ([]Origin, error) {
+	var admitted []Origin
 	for _, in := range p.Origins {
 		if in.Origin == st.Self {
 			continue
 		}
-		in = expired(in, now)
-		i, found := searchOrigin(st.Origins, in.Origin)
+		digest, err := digestJSON(in)
+		if err != nil {
+			return nil, err
+		}
+		f, fenced := findFence(st.Fences, in.Origin)
+		_, held := st.block(in.Origin)
+		relayed, hasRelay := st.relay(in.Origin)
 		switch {
-		case !found:
-			st.Origins = slices.Insert(st.Origins, i, in)
-		case in.Revision < st.Origins[i].Revision:
-			continue
-		case in.Revision > st.Origins[i].Revision:
-			st.Origins[i] = in
-		default:
-			st.Origins[i] = union(st.Origins[i], in)
-		}
-		stored := st.Origins[i]
-		for _, w := range in.Worktrees {
-			j, ok := findWorktree(stored.Worktrees, w.ID)
-			if !ok {
-				continue
+		case !fenced || in.Revision > f.Revision:
+			admitted = append(admitted, in)
+		case in.Revision == f.Revision && digest != f.Digest:
+			return nil, fmt.Errorf("%w: origin %s revision %d", ErrOriginBlockConflict, in.Origin, in.Revision)
+		case in.Revision == f.Revision && held:
+			admitted = append(admitted, in)
+		case hasRelay && in.Revision == relayed.Revision:
+			relayDigest, err := digestJSON(relayed)
+			if err != nil {
+				return nil, err
 			}
-			for _, cp := range w.Checkpoints {
-				if slices.ContainsFunc(stored.Worktrees[j].Checkpoints, func(c Checkpoint) bool { return c.ID == cp.ID }) {
-					recorded = append(recorded, cp)
-				}
+			if relayDigest != digest {
+				return nil, fmt.Errorf("%w: origin %s revision %d", ErrOriginBlockConflict, in.Origin, in.Revision)
 			}
 		}
 	}
-	return recorded
+	return admitted, nil
 }
 
-func union(held, in Origin) Origin {
-	tombstones := slices.Clone(held.Tombstones)
-	for _, t := range in.Tombstones {
-		i, found := slices.BinarySearchFunc(tombstones, t.ID, func(t Tombstone, id string) int { return strings.Compare(t.ID, id) })
-		if !found {
-			tombstones = slices.Insert(tombstones, i, t)
-		}
+func (st *state) hold(in Origin) error {
+	digest, err := digestJSON(in)
+	if err != nil {
+		return err
 	}
-	worktrees := slices.Clone(held.Worktrees)
-	for _, w := range in.Worktrees {
-		i, found := findWorktree(worktrees, w.ID)
-		if !found {
-			worktrees = slices.Insert(worktrees, i, w)
-			continue
-		}
-		cps := slices.Clone(worktrees[i].Checkpoints)
-		for _, cp := range w.Checkpoints {
-			if !slices.ContainsFunc(cps, func(c Checkpoint) bool { return c.ID == cp.ID }) {
-				cps = append(cps, cp)
-			}
-		}
-		slices.SortFunc(cps, compareCheckpoints)
-		worktrees[i].Checkpoints = cps
+	if i, found := searchOrigin(st.Origins, in.Origin); found {
+		st.Origins[i] = in
+	} else {
+		st.Origins = slices.Insert(st.Origins, i, in)
 	}
-	worktrees = slices.DeleteFunc(worktrees, func(w Worktree) bool {
-		_, dead := slices.BinarySearchFunc(tombstones, w.ID, func(t Tombstone, id string) int { return strings.Compare(t.ID, id) })
-		return dead
-	})
-	held.Worktrees, held.Tombstones = worktrees, tombstones
-	return held
+	f := fence{Origin: in.Origin, Revision: in.Revision, Digest: digest}
+	if i, found := slices.BinarySearchFunc(st.Fences, in.Origin, func(f fence, origin string) int { return strings.Compare(f.Origin, origin) }); found {
+		st.Fences[i] = f
+	} else {
+		st.Fences = slices.Insert(st.Fences, i, f)
+	}
+	return nil
 }
 
-func (st *state) exportable(now time.Time) Payload {
-	p := Payload{Identity: Identity, Version: Version, Exporter: st.Self, Origins: make([]Origin, 0, len(st.Origins))}
-	for _, o := range st.Origins {
-		out := Origin{Origin: o.Origin, Revision: o.Revision, Worktrees: []Worktree{}, Tombstones: liveTombstones(o.Tombstones, now)}
-		for _, w := range o.Worktrees {
-			w.Checkpoints = slices.DeleteFunc(unexpired(w.Checkpoints, now), func(cp Checkpoint) bool {
-				return o.Origin != st.Self && !st.Readiness[cp.ID].Ready
-			})
-			if len(w.Checkpoints) > 0 {
-				out.Worktrees = append(out.Worktrees, w)
+func (st *state) promote(origin string, closure map[artifact.Digest]bool, now time.Time) {
+	held, ok := st.block(origin)
+	if !ok {
+		return
+	}
+	if r, ok := st.relay(origin); ok && r.Revision == held.Revision {
+		return
+	}
+	for _, cp := range live(*held, now) {
+		if !closure[cp.Root.Digest] && !st.Readiness[cp.ID].Ready {
+			return
+		}
+	}
+	if i, found := searchOrigin(st.Relays, origin); found {
+		st.Relays[i] = *held
+	} else {
+		st.Relays = slices.Insert(st.Relays, i, *held)
+	}
+}
+
+func (st *state) unready(blocks []Origin, now time.Time) []Checkpoint {
+	var out []Checkpoint
+	for _, o := range blocks {
+		for _, cp := range live(o, now) {
+			if !st.Readiness[cp.ID].Ready {
+				out = append(out, cp)
 			}
 		}
-		p.Origins = append(p.Origins, out)
 	}
-	return p
+	return out
+}
+
+func (st *state) exportable() Payload {
+	origins := slices.Clone(st.Relays)
+	if own, ok := st.block(st.Self); ok {
+		origins = append(origins, *own)
+	}
+	slices.SortFunc(origins, func(a, b Origin) int { return strings.Compare(a.Origin, b.Origin) })
+	return Payload{Identity: Identity, Version: Version, Exporter: st.Self, Origins: origins}
+}
+
+func exportDigests(p Payload, now time.Time) (body, roots string, err error) {
+	if body, err = digestJSON(p.Origins); err != nil {
+		return "", "", err
+	}
+	refs, err := rootsAt(p.Origins, now)
+	if err != nil {
+		return "", "", err
+	}
+	roots, err = digestJSON(refs)
+	return body, roots, err
 }
 
 func (st *state) relayedIDs() map[string]bool {
@@ -575,27 +736,23 @@ func (st *state) count() int {
 	return n
 }
 
-func (st *state) ready() int {
+func (st *state) ready(now time.Time) int {
 	n := 0
 	for _, o := range st.Origins {
-		for _, w := range o.Worktrees {
-			for _, cp := range w.Checkpoints {
-				if o.Origin == st.Self || st.Readiness[cp.ID].Ready {
-					n++
-				}
+		for _, cp := range live(o, now) {
+			if o.Origin == st.Self || st.Readiness[cp.ID].Ready {
+				n++
 			}
 		}
 	}
 	return n
 }
 
-func (st *state) roots() []artifact.Ref {
+func (st *state) roots(now time.Time) []artifact.Ref {
 	var roots []artifact.Ref
-	for _, o := range st.Origins {
-		for _, w := range o.Worktrees {
-			for _, cp := range w.Checkpoints {
-				roots = append(roots, cp.Root)
-			}
+	for _, o := range slices.Concat(st.Origins, st.Relays) {
+		for _, cp := range live(o, now) {
+			roots = append(roots, cp.Root)
 		}
 	}
 	slices.SortFunc(roots, func(a, b artifact.Ref) int { return strings.Compare(string(a.Digest), string(b.Digest)) })
@@ -618,6 +775,14 @@ func (st *state) setReceipt(r syncservice.Receipt) {
 		return
 	}
 	st.Receipts = slices.Insert(st.Receipts, i, r)
+}
+
+func digestJSON(v any) (string, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("catalog: digest: %w", err)
+	}
+	return digestOf(data), nil
 }
 
 func digestOf(data []byte) string {

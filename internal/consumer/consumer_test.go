@@ -21,9 +21,20 @@ import (
 var t0 = time.Date(2026, 9, 26, 12, 30, 0, 0, time.UTC)
 
 type fakeArtifacts struct {
-	owner string
-	roots []artifact.Ref
-	gcs   int
+	owner    string
+	roots    []artifact.Ref
+	gcs      int
+	complete map[artifact.Digest]bool
+}
+
+func (f *fakeArtifacts) Complete(_ context.Context, roots []artifact.Ref) (int, error) {
+	missing := 0
+	for _, r := range roots {
+		if !f.complete[r.Digest] {
+			missing++
+		}
+	}
+	return missing, nil
 }
 
 func (f *fakeArtifacts) SetPins(_ context.Context, owner string, roots []artifact.Ref) error {
@@ -75,7 +86,7 @@ func newHost(t *testing.T, name string) *host {
 	dir := t.TempDir()
 	now := t0
 	h := &host{
-		name: name, clock: &now, artifacts: &fakeArtifacts{}, verifier: &fakeVerifier{verdicts: map[artifact.Digest]CodeVerdict{}},
+		name: name, clock: &now, artifacts: &fakeArtifacts{complete: map[artifact.Digest]bool{}}, verifier: &fakeVerifier{verdicts: map[artifact.Digest]CodeVerdict{}},
 		publisher: &countingPublisher{}, stampDir: filepath.Join(dir, "stamp"),
 	}
 	h.catalog = catalog.New(filepath.Join(dir, "catalog-v1.json"), name, func() time.Time { return *h.clock })
@@ -116,6 +127,10 @@ func (h *host) record(t *testing.T, wt, root string, at time.Time) catalog.Check
 		t.Fatal(err)
 	}
 	return cp
+}
+
+func micros(at time.Time) syncservice.Revision {
+	return syncservice.NewRevision(uint64(at.UnixMicro()))
 }
 
 func (h *host) export(t *testing.T) syncservice.ChangeEnvelope {
@@ -171,15 +186,20 @@ func TestExportArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Kind != syncservice.ChangeSnapshot || first.BaseRevision != "0" || first.SourceRevision != "1" || !slices.Equal(first.Artifacts, roots) {
+	if first.Kind != syncservice.ChangeSnapshot || first.BaseRevision != "0" || first.SourceRevision != micros(t0) || !slices.Equal(first.Artifacts, roots) {
 		t.Fatalf("export = kind %s base %s source %s artifacts %v", first.Kind, first.BaseRevision, first.SourceRevision, first.Artifacts)
 	}
-	if again := h.export(t); again.ChangeID != first.ChangeID || again.SourceRevision != "1" {
-		t.Fatalf("unchanged export = %s@%s, want %s@1", again.ChangeID, again.SourceRevision, first.ChangeID)
+	if again := h.export(t); again.ChangeID != first.ChangeID || again.SourceRevision != first.SourceRevision {
+		t.Fatalf("unchanged export = %s@%s, want %s@%s", again.ChangeID, again.SourceRevision, first.ChangeID, first.SourceRevision)
 	}
 	h.record(t, "w1", "r2", t0.Add(time.Minute))
-	if next := h.export(t); next.SourceRevision != "2" {
-		t.Fatalf("changed export source = %s, want 2", next.SourceRevision)
+	if next, want := h.export(t), syncservice.NewRevision(uint64(t0.UnixMicro())+1); next.SourceRevision != want {
+		t.Fatalf("changed export source = %s, want previous+1 %s", next.SourceRevision, want)
+	}
+	*h.clock = t0.Add(time.Hour)
+	h.record(t, "w1", "r3", t0.Add(time.Hour))
+	if next := h.export(t); next.SourceRevision != micros(*h.clock) {
+		t.Fatalf("changed export source = %s, want now in micros %s", next.SourceRevision, micros(*h.clock))
 	}
 	for _, req := range []syncservice.ExportRequest{
 		{ServiceID: "other", SchemaFingerprint: Fingerprint, SinceRevision: "0"},
@@ -218,19 +238,19 @@ func TestApplyArtifactsReadiness(t *testing.T) {
 			want:        map[string]catalog.Readiness{"r1": {Ready: true}, "r2": {Missing: []string{catalog.MissingClosure}}},
 		},
 		{
-			name:        "code not ready while fetch is paused",
+			name:        "prerequisites missing",
 			readyRoots:  []string{"r1", "r2"},
 			verdicts:    map[string]CodeVerdict{"r2": {Missing: []string{"trunk base 1234"}}},
 			wantPartial: true,
-			want:        map[string]catalog.Readiness{"r1": {Ready: true}, "r2": {Missing: []string{"trunk base 1234"}, Deferred: DeferredFetch}},
+			want:        map[string]catalog.Readiness{"r1": {Ready: true}, "r2": {Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}},
 		},
 		{
-			name:        "code not ready with fetch allowed",
+			name:        "prerequisites missing with fetch allowed",
 			readyRoots:  []string{"r1", "r2"},
 			verdicts:    map[string]CodeVerdict{"r2": {Missing: []string{"trunk base 1234"}}},
 			fetch:       true,
 			wantPartial: true,
-			want:        map[string]catalog.Readiness{"r1": {Ready: true}, "r2": {Missing: []string{"trunk base 1234"}}},
+			want:        map[string]catalog.Readiness{"r1": {Ready: true}, "r2": {Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}},
 		},
 	}
 	for _, tt := range tests {
@@ -266,8 +286,8 @@ func TestApplyArtifactsReadiness(t *testing.T) {
 					t.Errorf("readiness of %s = %+v, want %+v", r, got, w)
 				}
 			}
-			if slices.Contains(b.verifier.fetches, !tt.fetch) {
-				t.Fatalf("verifier fetch flags = %v, want all %v", b.verifier.fetches, tt.fetch)
+			if slices.Contains(b.verifier.fetches, true) {
+				t.Fatalf("verifier fetch flags = %v, want no origin fetch inside apply", b.verifier.fetches)
 			}
 			if b.publisher.n != 1 {
 				t.Fatalf("publishes = %d, want 1", b.publisher.n)
@@ -335,36 +355,110 @@ func TestApplyArtifactsRefusesRootMismatch(t *testing.T) {
 	}
 }
 
-func TestRelayExportsReadyBlocksVerbatim(t *testing.T) {
+func relayedBlocks(t *testing.T, change syncservice.ChangeEnvelope) []catalog.Origin {
+	t.Helper()
+	p, err := catalog.Decode(change.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.DeleteFunc(p.Origins, func(o catalog.Origin) bool { return o.Origin == change.Origin })
+}
+
+func TestRelayExportsArtifactCompleteBlocksVerbatim(t *testing.T) {
 	a, b, c := newHost(t, "a"), newHost(t, "b"), newHost(t, "c")
 	a.record(t, "w1", "r1", t0)
 	a.record(t, "w2", "r2", t0.Add(-time.Minute))
 	fromA := a.export(t)
-	if _, err := b.consumer.ApplyArtifacts(t.Context(), fromA, []artifact.Ref{ref("r1")}); err != nil {
-		t.Fatal(err)
-	}
-	*b.clock = t0.Add(48 * time.Hour)
-	fromB := b.export(t)
-	relayed, err := catalog.Decode(fromB.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
 	original, err := catalog.Decode(fromA.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := original.Origins[0]
-	want.Worktrees = want.Worktrees[:1]
-	if len(relayed.Origins) != 1 || !reflect.DeepEqual(relayed.Origins[0], want) {
-		t.Fatalf("relayed origins = %+v, want only the ready block %+v", relayed.Origins, want)
+	if _, err := b.consumer.ApplyArtifacts(t.Context(), fromA, []artifact.Ref{ref("r1")}); err != nil {
+		t.Fatal(err)
 	}
-	res, err := c.consumer.ApplyArtifacts(t.Context(), fromB, fromB.Artifacts)
-	if err != nil || res.AckedRevision != fromB.SourceRevision {
+	if got := relayedBlocks(t, b.export(t)); len(got) != 0 {
+		t.Fatalf("relayed %+v while r2's closure is missing", got)
+	}
+	b.verifier.verdicts[ref("r2").Digest] = CodeVerdict{Missing: []string{"trunk base 1234"}}
+	res, err := b.consumer.ApplyArtifacts(t.Context(), fromA, []artifact.Ref{ref("r1"), ref("r2")})
+	if err != nil || !res.Partial {
+		t.Fatalf("apply with unverified code = %+v, %v; want Partial", res, err)
+	}
+	fromB := b.export(t)
+	if got := relayedBlocks(t, fromB); len(got) != 1 || !reflect.DeepEqual(got[0], original.Origins[0]) {
+		t.Fatalf("relayed %+v, want the artifact-complete block verbatim %+v", got, original.Origins[0])
+	}
+	res, err = c.consumer.ApplyArtifacts(t.Context(), fromB, fromB.Artifacts)
+	if err != nil || res != (syncservice.ApplyResult{AckedRevision: fromB.SourceRevision}) {
 		t.Fatalf("c apply = %+v, %v", res, err)
 	}
 	snap, err := c.catalog.Load()
-	if err != nil || !reflect.DeepEqual(snap.Origins, relayed.Origins) {
-		t.Fatalf("c holds %+v, want %+v (%v)", snap.Origins, relayed.Origins, err)
+	if err != nil || !reflect.DeepEqual(snap.Origins, relayedBlocks(t, fromB)) {
+		t.Fatalf("c holds %+v, want %+v (%v)", snap.Origins, relayedBlocks(t, fromB), err)
+	}
+	forged, err := catalog.Decode(fromB.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Origins[0].Worktrees = forged.Origins[0].Worktrees[:1]
+	data, err := catalog.Encode(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, err := catalog.Roots(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict, err := syncservice.NewExportedArtifactChange(ServiceID, Fingerprint, syncservice.ChangeSnapshot, "0", fromB.SourceRevision, data, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict, err = syncservice.BindDelivery(conflict, "d"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.consumer.ApplyArtifacts(t.Context(), conflict, roots); !errors.Is(err, catalog.ErrOriginBlockConflict) {
+		t.Fatalf("equal revision with a different block = %v, want ErrOriginBlockConflict", err)
+	}
+	if again, err := c.catalog.Load(); err != nil || !reflect.DeepEqual(again, snap) {
+		t.Fatalf("conflicting change was recorded: %+v, %v", again.Origins, err)
+	}
+}
+
+func TestVerifyDeferredFetchesOnlyWhenAllowed(t *testing.T) {
+	a, b := newHost(t, "a"), newHost(t, "b")
+	id := a.record(t, "w1", "r1", t0).ID
+	change := a.export(t)
+	b.verifier.verdicts[ref("r1").Digest] = CodeVerdict{Missing: []string{"trunk base 1234"}}
+	res, err := b.consumer.ApplyArtifacts(t.Context(), change, []artifact.Ref{ref("r1")})
+	if err != nil || !res.Partial {
+		t.Fatalf("apply = %+v, %v; want Partial", res, err)
+	}
+	b.artifacts.complete[ref("r1").Digest] = true
+	if err := b.consumer.VerifyDeferred(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := b.catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := snap.ReadinessOf("a", id), (catalog.Readiness{Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}); !reflect.DeepEqual(got, want) || len(b.verifier.calls) != 1 {
+		t.Fatalf("paused network: readiness %+v after %d verifications, want %+v after 1", got, len(b.verifier.calls), want)
+	}
+	b.fetch = true
+	delete(b.verifier.verdicts, ref("r1").Digest)
+	published := b.publisher.n
+	if err := b.consumer.VerifyDeferred(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []bool{false, true}; !slices.Equal(b.verifier.fetches, want) || b.publisher.n != published+1 {
+		t.Fatalf("fetch flags %v, publishes %d; want %v and one more publish", b.verifier.fetches, b.publisher.n-published, want)
+	}
+	if snap, err = b.catalog.Load(); err != nil || !snap.ReadinessOf("a", id).Ready {
+		t.Fatalf("readiness after background fetch = %+v, %v; want ready", snap.ReadinessOf("a", id), err)
+	}
+	res, err = b.consumer.ApplyArtifacts(t.Context(), change, []artifact.Ref{ref("r1")})
+	if err != nil || res != (syncservice.ApplyResult{AckedRevision: change.SourceRevision}) || len(b.verifier.calls) != 2 {
+		t.Fatalf("redelivery = %+v, %v after %d verifications; want a full ack without re-verifying", res, err, len(b.verifier.calls))
 	}
 }
 
@@ -387,7 +481,7 @@ func TestReconcilePinsRetainedRoots(t *testing.T) {
 
 func TestPayloadAtScale(t *testing.T) {
 	const worktrees, checkpoints = 40, 33
-	p := catalog.Payload{Identity: catalog.Identity, Version: catalog.Version, Exporter: "a"}
+	p := catalog.Payload{Identity: catalog.Identity, Version: catalog.Version, Exporter: "a", AsOf: t0}
 	block := catalog.Origin{Origin: "a", Revision: 99999}
 	for w := range worktrees {
 		wt := tree(fmt.Sprintf("worktree-%02d", w))

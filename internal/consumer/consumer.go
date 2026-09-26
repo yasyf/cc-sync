@@ -1,7 +1,8 @@
 // Package consumer serves cc-sync's checkpoint catalog to synckit as an
-// artifact consumer: one stamp watch item, snapshot exports whose roots are
-// every ready checkpoint, and fenced applies that acknowledge a change only
-// once every checkpoint in it is ready on this host.
+// artifact consumer: one stamp watch item, snapshot exports that carry this
+// host's block and every artifact-complete relayed block verbatim, and
+// fenced applies that acknowledge a change only once every checkpoint in it
+// is ready on this host.
 package consumer
 
 import (
@@ -27,17 +28,13 @@ const WatchItemID = "checkpoints"
 // PinOwner owns the pins on every retained checkpoint root.
 const PinOwner = "cc-sync/catalog"
 
-// DeferredFetch marks a checkpoint whose code could not verify while network
-// policy withheld the origin fetch.
-const DeferredFetch = "origin-fetch-paused"
-
-const declaration = "payload:{identity:cc-sync-catalog-v1,version:1,exporter:string,origins:[origin]};" +
-	"origin:{origin:string,revision:uint64,worktrees:[worktree],tombstones:[tombstone]};" +
+const declaration = "payload:{identity:cc-sync-catalog-v1,version:1,exporter:string,as_of:time,origins:[origin]};" +
+	"origin:{origin:string,revision:max(prev+1,unix_micros),worktrees:[worktree],tombstones:[tombstone]};relay:verbatim,artifact-complete;" +
 	"worktree:{id:string,repo:{origin:string,relpath:string,branch:string?,source_path:string},orca:{kind:string,name:string,instance_id:string,freshness:time}?,checkpoints:[checkpoint]};" +
 	"checkpoint:{id:sha256(origin,worktree,root),root:artifact.ref,classes:[latest|hourly|daily],captured_at:time,source_activity_at:time,expires_at:time(source_activity_at+7d)," +
 	"sessions:[{id:string,title:string?,last_activity:time,last_human_activity:time,activity:string,claude_version:string?}],code:reposync.summary,deferred:string?,completeness:{complete:bool,missing:[string]?}};" +
 	"tombstone:{id:string,revision:uint64,deleted_at:time,expires_at:time};" +
-	"delivery:{kind:snapshot,base_revision:0,source_revision:uint64,artifacts:roots(latest,human_activity,captured_at)};" +
+	"delivery:{kind:snapshot,base_revision:0,source_revision:max(prev+1,unix_micros),artifacts:roots(unexpired_at(as_of),latest,hourly,daily,human_activity,captured_at,cap(max_roots))};" +
 	"receipt:{origin:string,change_id:sha256,revision:uint64,payload_digest:sha256}"
 
 // Fingerprint is the schema fingerprint cc-sync registers with synckit.
@@ -54,10 +51,13 @@ var (
 	ErrRootsMismatch = errors.New("consumer: change artifacts differ from the roots its payload derives")
 )
 
-// Artifacts is the slice of the artifact store Reconcile drives.
+// Artifacts is the slice of the artifact store the consumer drives: pins
+// and GC for Reconcile, closure checks for applies and background
+// verification.
 type Artifacts interface {
 	SetPins(ctx context.Context, owner string, roots []artifact.Ref) error
 	GC(ctx context.Context) (artifact.GCReport, error)
+	Complete(ctx context.Context, roots []artifact.Ref) (missing int, err error)
 }
 
 // CodeVerdict is whether a checkpoint's code snapshot restores on this host,
@@ -79,7 +79,7 @@ type Publisher interface {
 }
 
 // Config wires a Consumer. FetchAllowed reports whether network policy
-// currently allows a bulk origin fetch.
+// currently allows a bulk origin fetch; only VerifyDeferred consults it.
 type Config struct {
 	Catalog      *catalog.Store
 	Publisher    Publisher
@@ -146,8 +146,8 @@ func (c *Consumer) Apply(context.Context, syncservice.ChangeEnvelope) (syncservi
 	return syncservice.ApplyResult{}, ErrV1
 }
 
-// ExportArtifacts snapshots every locally ready checkpoint, own and relayed,
-// with roots derived from that payload.
+// ExportArtifacts snapshots this host's block and every relayed block that
+// met the artifact-completeness bar, with roots derived from that payload.
 func (c *Consumer) ExportArtifacts(ctx context.Context, request syncservice.ExportRequest) (syncservice.ChangeEnvelope, error) {
 	if err := request.Validate(); err != nil {
 		return syncservice.ChangeEnvelope{}, err
@@ -168,10 +168,12 @@ func (c *Consumer) ExportArtifacts(ctx context.Context, request syncservice.Expo
 }
 
 // ApplyArtifacts decodes change, refuses it unless its artifacts are exactly
-// the roots its payload derives, fences it by origin, verifies the code of
-// every checkpoint it would newly record whose root is in ready, and merges
-// it. The result acknowledges the change only when every checkpoint in it is
-// ready here; otherwise it is Partial with the prior receipt.
+// the roots its payload derives, fences it by origin, and merges it. Every
+// checkpoint it would newly hold whose root closure is complete has its code
+// verified without an origin fetch; one missing prerequisites records
+// catalog.MissingPrerequisites for VerifyDeferred. The result acknowledges
+// the change only when every checkpoint in it is ready here; otherwise it is
+// Partial with the prior receipt.
 func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.ChangeEnvelope, ready []artifact.Ref) (syncservice.ApplyResult, error) {
 	if change.ServiceID != ServiceID || change.SchemaFingerprint != Fingerprint {
 		return syncservice.ApplyResult{}, fmt.Errorf("%w: %s %s", ErrSchema, change.ServiceID, change.SchemaFingerprint)
@@ -194,8 +196,15 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 	if decision != syncservice.FenceApply {
 		return fenced, nil
 	}
-	evidence, err := c.verify(ctx, payload, ready)
+	pending, err := c.cfg.Catalog.Unverified(payload)
 	if err != nil {
+		return syncservice.ApplyResult{}, err
+	}
+	evidence := catalog.Evidence{Roots: make(map[artifact.Digest]bool, len(ready)), Verified: map[string]catalog.Readiness{}}
+	for _, root := range ready {
+		evidence.Roots[root.Digest] = true
+	}
+	if err := c.settle(ctx, pending, evidence, false); err != nil {
 		return syncservice.ApplyResult{}, err
 	}
 	result, err := c.cfg.Catalog.Apply(ctx, change, payload, evidence)
@@ -205,32 +214,52 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 	return result, c.cfg.Publisher.Publish(ctx)
 }
 
-func (c *Consumer) verify(ctx context.Context, payload catalog.Payload, ready []artifact.Ref) (catalog.Evidence, error) {
-	evidence := catalog.Evidence{Roots: make(map[artifact.Digest]bool, len(ready)), Verified: map[string]catalog.Readiness{}}
-	for _, root := range ready {
-		evidence.Roots[root.Digest] = true
-	}
-	pending, err := c.cfg.Catalog.Unverified(payload)
+// VerifyDeferred is the resident's background half of verification, run
+// outside any apply: it re-checks the artifact closure of every held relayed
+// checkpoint not yet ready, relays every held block that is now
+// artifact-complete, and, when network policy allows an origin fetch,
+// verifies each closure-complete checkpoint with that fetch. It then
+// publishes, so the next delivery of a waiting change can acknowledge it.
+func (c *Consumer) VerifyDeferred(ctx context.Context) error {
+	pending, err := c.cfg.Catalog.Pending()
 	if err != nil {
-		return catalog.Evidence{}, err
+		return err
 	}
-	fetch := c.cfg.FetchAllowed()
+	evidence := catalog.Evidence{Roots: map[artifact.Digest]bool{}, Verified: map[string]catalog.Readiness{}}
+	if err := c.settle(ctx, pending, evidence, true); err != nil {
+		return err
+	}
+	if err := c.cfg.Catalog.Settle(ctx, evidence); err != nil {
+		return err
+	}
+	return c.cfg.Publisher.Publish(ctx)
+}
+
+func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evidence catalog.Evidence, background bool) error {
+	fetch := background && c.cfg.FetchAllowed()
 	for _, cp := range pending {
 		if !evidence.Roots[cp.Root.Digest] {
+			missing, err := c.cfg.Artifacts.Complete(ctx, []artifact.Ref{cp.Root})
+			if err != nil {
+				return fmt.Errorf("consumer: closure of %s: %w", cp.ID, err)
+			}
+			evidence.Roots[cp.Root.Digest] = missing == 0
+		}
+		if !evidence.Roots[cp.Root.Digest] || background && !fetch {
 			continue
 		}
 		verdict, err := c.cfg.Verifier.VerifyCode(ctx, cp.Root, fetch)
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return catalog.Evidence{}, ctxErr
+			return ctxErr
 		}
-		readiness := catalog.Readiness{Ready: verdict.Ready, Missing: verdict.Missing}
 		switch {
 		case err != nil:
-			readiness = catalog.Readiness{Missing: []string{err.Error()}}
-		case !verdict.Ready && !fetch:
-			readiness.Deferred = DeferredFetch
+			evidence.Verified[cp.ID] = catalog.Readiness{Missing: []string{err.Error()}}
+		case verdict.Ready:
+			evidence.Verified[cp.ID] = catalog.Readiness{Ready: true}
+		default:
+			evidence.Verified[cp.ID] = catalog.Readiness{Missing: verdict.Missing, Deferred: catalog.MissingPrerequisites}
 		}
-		evidence.Verified[cp.ID] = readiness
 	}
-	return evidence, nil
+	return nil
 }

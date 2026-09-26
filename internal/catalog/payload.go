@@ -48,17 +48,20 @@ const (
 
 var classOrder = []Class{ClassLatest, ClassHourly, ClassDaily}
 
-// Payload is the catalog one exporter sends: every origin block it holds,
-// restricted to checkpoints ready on the exporter.
+// Payload is the catalog one exporter sends: its own block and, verbatim,
+// the newest block of every relayed origin whose unexpired roots are all
+// artifact-complete on the exporter. AsOf is the time its roots derive at.
 type Payload struct {
-	Identity string   `json:"identity"`
-	Version  uint64   `json:"version"`
-	Exporter string   `json:"exporter"`
-	Origins  []Origin `json:"origins"`
+	Identity string    `json:"identity"`
+	Version  uint64    `json:"version"`
+	Exporter string    `json:"exporter"`
+	AsOf     time.Time `json:"as_of"`
+	Origins  []Origin  `json:"origins"`
 }
 
-// Origin is one source host's block. Only that host changes it, bumping
-// Revision on every change; relays copy it verbatim.
+// Origin is one source host's block. Only that host changes it, moving
+// Revision to max(previous+1, now in Unix microseconds) on every change;
+// relays copy it verbatim and never edit it.
 type Origin struct {
 	Origin     string      `json:"origin"`
 	Revision   uint64      `json:"revision"`
@@ -142,8 +145,8 @@ func (p Payload) Validate() error {
 	if p.Identity != Identity || p.Version != Version {
 		return fmt.Errorf("%w: payload identity %q version %d", ErrInvalid, p.Identity, p.Version)
 	}
-	if p.Exporter == "" {
-		return fmt.Errorf("%w: payload exporter is empty", ErrInvalid)
+	if p.Exporter == "" || p.AsOf.IsZero() {
+		return fmt.Errorf("%w: payload exporter %q as of %s", ErrInvalid, p.Exporter, p.AsOf)
 	}
 	return validateOrigins(p.Origins)
 }
@@ -286,42 +289,41 @@ func Decode(data []byte) (Payload, error) {
 	return p, nil
 }
 
-// Roots derives the payload's artifact roots in delivery priority order:
-// every worktree's latest checkpoint before older ones, then the most recent
-// human activity, then the newest capture. Equal payloads always derive
-// equal roots.
+// Roots derives the payload's artifact roots in delivery priority order: the
+// checkpoints unexpired at AsOf, every worktree's latest first, then hourly,
+// then daily, each by most recent human activity and then newest capture,
+// capped at artifact.MaxRoots. Equal payloads always derive equal roots.
 func Roots(p Payload) ([]artifact.Ref, error) {
+	return rootsAt(p.Origins, p.AsOf)
+}
+
+func rootsAt(origins []Origin, at time.Time) ([]artifact.Ref, error) {
 	type ranked struct {
-		cp     Checkpoint
-		latest bool
-		human  time.Time
+		cp    Checkpoint
+		class int
+		human time.Time
 	}
 	var all []ranked
-	for _, o := range p.Origins {
-		for _, w := range o.Worktrees {
-			for _, cp := range w.Checkpoints {
-				r := ranked{cp: cp, latest: slices.Contains(cp.Classes, ClassLatest)}
-				for _, s := range cp.Sessions {
-					if s.LastHumanActivity.After(r.human) {
-						r.human = s.LastHumanActivity
-					}
+	for _, o := range origins {
+		for _, cp := range live(o, at) {
+			r := ranked{cp: cp, class: slices.Index(classOrder, cp.Classes[0])}
+			for _, s := range cp.Sessions {
+				if s.LastHumanActivity.After(r.human) {
+					r.human = s.LastHumanActivity
 				}
-				all = append(all, r)
 			}
+			all = append(all, r)
 		}
 	}
 	slices.SortFunc(all, func(a, b ranked) int {
-		if a.latest != b.latest {
-			if a.latest {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Or(b.human.Compare(a.human), compareCheckpoints(a.cp, b.cp))
+		return cmp.Or(cmp.Compare(a.class, b.class), b.human.Compare(a.human), compareCheckpoints(a.cp, b.cp))
 	})
-	roots := make([]artifact.Ref, 0, len(all))
+	roots := make([]artifact.Ref, 0, min(len(all), artifact.MaxRoots))
 	seen := make(map[artifact.Digest]bool, len(all))
 	for _, r := range all {
+		if len(roots) == artifact.MaxRoots {
+			break
+		}
 		if seen[r.cp.Root.Digest] {
 			continue
 		}

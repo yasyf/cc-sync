@@ -42,6 +42,10 @@ func point(root string, captured, activity time.Time) Checkpoint {
 	}
 }
 
+func micros(at time.Time) uint64 {
+	return uint64(at.UnixMicro())
+}
+
 func newStore(t *testing.T, self string, c *clock) *Store {
 	t.Helper()
 	return New(filepath.Join(t.TempDir(), "catalog-v1.json"), self, c.now)
@@ -192,16 +196,33 @@ func TestRecordDerivesExpiryAndBumpsRevision(t *testing.T) {
 	if want := CheckpointID("a", "w1", ref("r1")); got.ID != want {
 		t.Fatalf("ID = %s, want %s", got.ID, want)
 	}
+	if o := block(t, s, "a"); o.Revision != micros(t0) {
+		t.Fatalf("first revision = %d, want now in micros %d", o.Revision, micros(t0))
+	}
 	record(t, s, "w1", point("r2", t0.Add(time.Minute), t0))
-	if o := block(t, s, "a"); o.Revision != 2 || len(o.Worktrees[0].Checkpoints) != 1 {
-		t.Fatalf("block = revision %d with %d checkpoints, want revision 2 with 1 (same hour)", o.Revision, len(o.Worktrees[0].Checkpoints))
+	if o := block(t, s, "a"); o.Revision != micros(t0)+1 || len(o.Worktrees[0].Checkpoints) != 1 {
+		t.Fatalf("block = revision %d with %d checkpoints, want revision %d with 1 (same hour)", o.Revision, len(o.Worktrees[0].Checkpoints), micros(t0)+1)
+	}
+	record(t, s, "w1", point("r2", t0.Add(time.Minute), t0))
+	if o := block(t, s, "a"); o.Revision != micros(t0)+1 {
+		t.Fatalf("unchanged re-record moved revision to %d", o.Revision)
 	}
 	_, err := s.Record(t.Context(), tree("w1"), point("r3", t0, t0.Add(-ExpiryWindow)))
 	if !errors.Is(err, ErrExpired) {
 		t.Fatalf("Record expired = %v, want ErrExpired", err)
 	}
-	if o := block(t, s, "a"); o.Revision != 2 {
+	if o := block(t, s, "a"); o.Revision != micros(t0)+1 {
 		t.Fatalf("expired record changed revision to %d", o.Revision)
+	}
+	c.t = t0.Add(-time.Hour)
+	record(t, s, "w1", point("r4", t0.Add(2*time.Minute), t0))
+	if o := block(t, s, "a"); o.Revision != micros(t0)+2 {
+		t.Fatalf("revision after the clock stepped back = %d, want previous+1 %d", o.Revision, micros(t0)+2)
+	}
+	c.t = t0.Add(time.Hour)
+	record(t, s, "w1", point("r5", t0.Add(time.Hour), t0.Add(time.Hour)))
+	if o := block(t, s, "a"); o.Revision != micros(c.t) {
+		t.Fatalf("revision = %d, want now in micros %d", o.Revision, micros(c.t))
 	}
 }
 
@@ -217,7 +238,7 @@ func TestGCTombstonesExpiredWorktrees(t *testing.T) {
 	if res.Removed != 1 || len(res.Roots) != 0 {
 		t.Fatalf("GC = %+v, want 1 removed and no roots", res)
 	}
-	want := Origin{Origin: "a", Revision: 2, Tombstones: []Tombstone{{ID: "w1", Revision: 2, DeletedAt: c.t, ExpiresAt: c.t.Add(ExpiryWindow)}}}
+	want := Origin{Origin: "a", Revision: micros(c.t), Tombstones: []Tombstone{{ID: "w1", Revision: micros(c.t), DeletedAt: c.t, ExpiresAt: c.t.Add(ExpiryWindow)}}}
 	if got := block(t, s, "a"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("block = %+v, want %+v", got, want)
 	}
@@ -225,8 +246,8 @@ func TestGCTombstonesExpiredWorktrees(t *testing.T) {
 	if _, err := s.GC(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if got := block(t, s, "a"); got.Revision != 3 || len(got.Tombstones) != 0 {
-		t.Fatalf("block = %+v, want revision 3 without tombstones", got)
+	if got := block(t, s, "a"); got.Revision != micros(c.t) || len(got.Tombstones) != 0 {
+		t.Fatalf("block = %+v, want revision %d without tombstones", got, micros(c.t))
 	}
 }
 
@@ -245,8 +266,8 @@ func TestRelayCopiesExpiryVerbatim(t *testing.T) {
 	fromB := export(t, b)
 	apply(t, c, "b", fromB.Revision, fromB.Payload)
 	got := block(t, c, "a")
-	if got.Revision != 1 || !got.Worktrees[0].Checkpoints[0].ExpiresAt.Equal(recorded.ExpiresAt) {
-		t.Fatalf("relayed block = %+v, want revision 1 expiring %s", got, recorded.ExpiresAt)
+	if got.Revision != micros(t0) || !got.Worktrees[0].Checkpoints[0].ExpiresAt.Equal(recorded.ExpiresAt) {
+		t.Fatalf("relayed block = %+v, want revision %d expiring %s", got, micros(t0), recorded.ExpiresAt)
 	}
 	if !reflect.DeepEqual(got, block(t, a, "a")) {
 		t.Fatalf("relayed block differs from origin:\n got %+v\nwant %+v", got, block(t, a, "a"))
@@ -277,8 +298,8 @@ func TestTombstoneBlocksStaleRelayedResurrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept := block(t, c, "a")
-	if kept.Revision != 3 || len(kept.Worktrees) != 0 || len(kept.Tombstones) != 1 {
-		t.Fatalf("after x expired = %+v, want revision 3 holding only the w tombstone", kept)
+	if kept.Revision != micros(t0)+2 || len(kept.Worktrees) != 0 || len(kept.Tombstones) != 1 {
+		t.Fatalf("after x expired = %+v, want revision %d holding only the w tombstone", kept, micros(t0)+2)
 	}
 	stale.Exporter = "b"
 	res := apply(t, c, "b", 1, stale)
@@ -308,17 +329,178 @@ func TestApplyFencesPerOriginRevision(t *testing.T) {
 	subset.Origins[0].Worktrees = []Worktree{newer.Origins[0].Worktrees[0]}
 	subset.Origins[0].Worktrees[0].Checkpoints = newer.Origins[0].Worktrees[0].Checkpoints[:1]
 	subset.Exporter = "b"
-	fresh := newStore(t, "c", cc)
-	apply(t, fresh, "b", 1, subset)
-	apply(t, fresh, "a", 1, newer)
-	if got, want := block(t, fresh, "a"), newer.Origins[0]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("equal revision did not union: got %+v, want %+v", got, want)
+	for _, tt := range []struct {
+		name  string
+		first Payload
+	}{
+		{"nothing held", Payload{}},
+		{"full block held", newer},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(t, "c", cc)
+			if tt.first.Identity != "" {
+				apply(t, s, "a", 1, tt.first)
+			}
+			before, err := s.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.first.Identity == "" {
+				apply(t, s, "a", 1, newer)
+				if before, err = s.Load(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = s.Apply(t.Context(), change(t, "b", 1, subset), subset, allReady(subset))
+			if !errors.Is(err, ErrOriginBlockConflict) {
+				t.Fatalf("equal revision with a different block = %v, want ErrOriginBlockConflict", err)
+			}
+			if _, err := s.Unverified(subset); !errors.Is(err, ErrOriginBlockConflict) {
+				t.Fatalf("Unverified = %v, want ErrOriginBlockConflict", err)
+			}
+			after, err := s.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("conflicting change was recorded: %+v, want %+v", after, before)
+			}
+			if decision, _, err := s.Fence(change(t, "b", 1, subset)); err != nil || decision != syncservice.FenceApply {
+				t.Fatalf("conflicting change left a receipt: %v %v", decision, err)
+			}
+		})
 	}
-	full := newStore(t, "c", cc)
-	apply(t, full, "a", 1, newer)
-	apply(t, full, "b", 1, subset)
-	if got, want := block(t, full, "a"), newer.Origins[0]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("equal revision subset replaced the block: got %+v, want %+v", got, want)
+}
+
+func TestFencesOutliveForgottenBlocks(t *testing.T) {
+	older, newer, cc := &clock{t: t0}, &clock{t: t0.Add(time.Hour)}, &clock{t: t0}
+	aOld, aNew, c := newStore(t, "a", older), newStore(t, "a", newer), newStore(t, "c", cc)
+	record(t, aOld, "w", point("long", t0, t0))
+	record(t, aNew, "w", point("short", t0.Add(-6*24*time.Hour), t0.Add(-6*24*time.Hour)))
+	stale, fresh := export(t, aOld), export(t, aNew)
+	apply(t, c, "a", fresh.Revision, fresh.Payload)
+	cc.t = t0.Add(2 * 24 * time.Hour)
+	res, err := c.GC(t.Context())
+	if err != nil || res.Removed != 1 {
+		t.Fatalf("GC = %+v, %v; want the lapsed block forgotten", res, err)
+	}
+	stale.Payload.Exporter = "b"
+	apply(t, c, "b", 1, stale.Payload)
+	if snap, err := c.Load(); err != nil || len(snap.Origins) != 0 {
+		t.Fatalf("older revision resurrected past a forgotten block's fence: %+v, %v", snap.Origins, err)
+	}
+}
+
+func TestRelayExportsLastArtifactCompleteRevision(t *testing.T) {
+	ca, cb := &clock{t: t0}, &clock{t: t0}
+	a, b := newStore(t, "a", ca), newStore(t, "b", cb)
+	record(t, a, "w1", point("r1", t0, t0.Add(-6*24*time.Hour)))
+	record(t, a, "w2", point("r2", t0, t0))
+	first := export(t, a)
+	closure := func(roots ...string) Evidence {
+		ev := Evidence{Roots: map[artifact.Digest]bool{}, Verified: map[string]Readiness{}}
+		for _, r := range roots {
+			ev.Roots[ref(r).Digest] = true
+		}
+		return ev
+	}
+	relayed := func() (Exported, []Origin) {
+		t.Helper()
+		e := export(t, b)
+		return e, slices.DeleteFunc(slices.Clone(e.Payload.Origins), func(o Origin) bool { return o.Origin == "b" })
+	}
+	res, err := b.Apply(t.Context(), change(t, "a", first.Revision, first.Payload), first.Payload, closure("r1"))
+	if err != nil || !res.Partial {
+		t.Fatalf("apply without r2's closure = %+v, %v; want Partial", res, err)
+	}
+	if _, origins := relayed(); len(origins) != 0 {
+		t.Fatalf("relayed %+v before any revision was artifact-complete", origins)
+	}
+	res, err = b.Apply(t.Context(), change(t, "a", first.Revision, first.Payload), first.Payload, closure("r1", "r2"))
+	if err != nil || !res.Partial {
+		t.Fatalf("apply with closures but unverified code = %+v, %v; want Partial", res, err)
+	}
+	if got := block(t, b, "a"); len(got.Worktrees) != 2 {
+		t.Fatalf("held block = %+v", got)
+	}
+	e1, origins := relayed()
+	if len(origins) != 1 || !reflect.DeepEqual(origins[0], first.Payload.Origins[0]) {
+		t.Fatalf("relayed %+v, want the artifact-complete block verbatim %+v", origins, first.Payload.Origins[0])
+	}
+	ca.t = t0.Add(time.Minute)
+	record(t, a, "w3", point("r3", ca.t, ca.t))
+	second := export(t, a)
+	if _, err := b.Apply(t.Context(), change(t, "a", second.Revision, second.Payload), second.Payload, closure("r1", "r2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := block(t, b, "a"); got.Revision != second.Payload.Origins[0].Revision {
+		t.Fatalf("held revision = %d, want %d", got.Revision, second.Payload.Origins[0].Revision)
+	}
+	if e, origins := relayed(); len(origins) != 1 || !reflect.DeepEqual(origins[0], first.Payload.Origins[0]) || e.Revision != e1.Revision {
+		t.Fatalf("relayed %+v at %d, want the previous complete revision unchanged at %d", origins, e.Revision, e1.Revision)
+	}
+	if err := b.Settle(t.Context(), closure("r1", "r2", "r3")); err != nil {
+		t.Fatal(err)
+	}
+	e2, origins := relayed()
+	if len(origins) != 1 || !reflect.DeepEqual(origins[0], second.Payload.Origins[0]) || e2.Revision <= e1.Revision {
+		t.Fatalf("relayed %+v at %d, want the newly complete block verbatim past %d", origins, e2.Revision, e1.Revision)
+	}
+	cb.t = t0.Add(2 * 24 * time.Hour)
+	e3, origins := relayed()
+	roots, err := Roots(e3.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(origins[0], second.Payload.Origins[0]) || slices.Contains(roots, ref("r1")) || len(roots) != 2 || e3.Revision <= e2.Revision {
+		t.Fatalf("after r1 expired: relayed %+v roots %v at %d; want the block verbatim, r1 dropped from roots, revision past %d", origins, roots, e3.Revision, e2.Revision)
+	}
+	snap, err := b.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i, _ := searchOrigin(snap.Origins, "a"); len(snap.Origins[i].Worktrees) != 2 {
+		t.Fatalf("local view of a = %+v, want r1's worktree hidden once expired", snap.Origins[i])
+	}
+}
+
+func TestRootsOverflowKeepsLatestThenHourlyThenDaily(t *testing.T) {
+	n := artifact.MaxRoots/3 + 100
+	o := Origin{Origin: "a", Revision: 1}
+	var latest, hourly, daily []artifact.Ref
+	for i := range n {
+		w := tree(fmt.Sprintf("w%05d", i))
+		for _, c := range []struct {
+			kind    string
+			age     time.Duration
+			classes []Class
+		}{
+			{"latest", 0, []Class{ClassLatest, ClassHourly, ClassDaily}},
+			{"hourly", 2 * time.Hour, []Class{ClassHourly}},
+			{"daily", 30 * time.Hour, []Class{ClassDaily}},
+		} {
+			at := t0.Add(-c.age - time.Duration(i)*time.Second)
+			cp := point(fmt.Sprintf("%s-%05d", c.kind, i), at, at)
+			cp.ExpiresAt, cp.Classes = at.Add(ExpiryWindow), c.classes
+			w.Checkpoints = append(w.Checkpoints, cp)
+			switch c.kind {
+			case "latest":
+				latest = append(latest, cp.Root)
+			case "hourly":
+				hourly = append(hourly, cp.Root)
+			default:
+				daily = append(daily, cp.Root)
+			}
+		}
+		o.Worktrees = append(o.Worktrees, w)
+	}
+	got, err := Roots(Payload{AsOf: t0, Origins: []Origin{o}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := slices.Concat(latest, hourly, daily)[:artifact.MaxRoots]
+	if !slices.Equal(got, want) {
+		t.Fatalf("Roots = %d roots, want the first %d of latest, hourly, then daily by recency", len(got), artifact.MaxRoots)
 	}
 }
 
