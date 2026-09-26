@@ -17,6 +17,7 @@ func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 	notRunning := fmt.Errorf("%s: %w", delivery.MethodStatus, &rpc.TransportError{Undispatched: true, Err: errors.New("connection refused")})
 	dispatched := fmt.Errorf("%s: %w", delivery.MethodStatus, &rpc.TransportError{Err: errors.New("connection reset")})
 	boom := fmt.Errorf("%s: %w", delivery.MethodStatus, rpc.ReplyError("boom"))
+	prefixed := fmt.Errorf("%s: %w", delivery.MethodStatus, rpc.ReplyError("unknown method 'x'"))
 	statuses := []delivery.PeerStatus{{ServiceID: "cc-sync", Peer: "peer-a"}}
 	tests := []struct {
 		name        string
@@ -38,6 +39,7 @@ func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 		},
 		{name: "transport after dispatch", err: dispatched, msg: "delivery.status: rpc transport: connection reset"},
 		{name: "handler error", err: boom, msg: "delivery.status: boom"},
+		{name: "handler error sharing the frozen prefix", err: prefixed, msg: "delivery.status: unknown method 'x'"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
