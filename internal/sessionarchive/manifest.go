@@ -85,6 +85,9 @@ type Manifest struct {
 	CapturedAt     time.Time       `json:"captured_at"`
 	ClaudeVersion  string          `json:"claude_version"`
 	ConfigDir      string          `json:"config_dir"`
+	Home           string          `json:"home"`
+	TmpRoot        string          `json:"tmp_root"`
+	UID            int             `json:"uid"`
 	ProjectDirName string          `json:"project_dir_name"`
 	Cwd            string          `json:"cwd"`
 	OriginalCwd    string          `json:"original_cwd"`
