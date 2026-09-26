@@ -2,10 +2,12 @@ package pickup_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/inventory"
+	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/pickup"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/reposync/registry"
@@ -248,6 +251,97 @@ func (c *concrete) checkRestored(res pickup.Result) {
 	}
 	if want := []string{"pin", "unpin"}; len(c.pins) != 2 || !strings.HasSuffix(c.pins[0], ":"+want[0]) || !strings.HasSuffix(c.pins[1], ":"+want[1]) {
 		t.Errorf("pins = %v, want one pin then its release", c.pins)
+	}
+}
+
+const fakeOrcaScript = `#!/bin/sh
+dir=$(dirname "$0")/..
+key=$1
+[ "$1" = recovery ] && key="recovery-$2"
+for a in "$@"; do printf '%s\n' "$a"; done > "$dir/$key.argv"
+prev=
+for a in "$@"; do [ "$prev" = --recovery-launch-file ] && cp "$a" "$dir/$key.launch"; prev=$a; done
+cat > "$dir/$key.stdin"
+exec cat "$dir/$key.json"
+`
+
+const runtimeID = "00000000-0000-4000-8000-000000000001"
+
+var orcaReplies = map[string]string{
+	"status":            `{"id":"local-status","ok":true,"result":{"target":{"kind":"local"},"app":{"running":true,"pid":4242},"runtime":{"state":"ready","reachable":true,"runtimeId":"` + runtimeID + `","appVersion":"1.4.212","capabilities":["` + orcabridge.CapabilityWorkspace + `","` + orcabridge.CapabilityRecoveryLaunch + `"]}}}`,
+	"recovery-describe": `{"id":"local","ok":true,"result":{"protocol":1,"runtimeId":"` + runtimeID + `","executionHostId":"local","appVersion":"1.4.212","platform":"darwin","machineName":"test-mac","hostKind":"desktop","localClientInstanceId":null,"capabilities":["` + orcabridge.CapabilityWorkspace + `","` + orcabridge.CapabilityRecoveryLaunch + `"]}}`,
+	"recovery-import":   `{"id":"local","ok":true,"result":{"importKey":"key-1","disposition":"imported","repoId":"repo-1","worktreeId":"repo-1::w9","instanceId":"inst-1","presentationSource":{"kind":"client-view","clientKey":"local-renderer"},"idMap":{"tabs":{"t1":"t9"},"groups":{"g1":"g9"},"leaves":{"l1":"l9"},"browsers":{}},"bindings":[{"sourcePaneKey":"t1:l1","localPaneKey":"t9:l9","binding":{"agent":"claude","key":"session_id","id":"` + sid + `"},"status":"resumed","terminalHandle":"term-1"}],"provenance":{"importKey":"key-1"}}}`,
+}
+
+func fakeOrca(t *testing.T) (*orcabridge.Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	write(t, filepath.Join(bin, "orca"), fakeOrcaScript)
+	if err := os.Chmod(filepath.Join(bin, "orca"), 0o700); err != nil { //nolint:gosec // G302: an executable test stub must be +x.
+		t.Fatal(err)
+	}
+	for key, reply := range orcaReplies {
+		write(t, filepath.Join(dir, key+".json"), reply)
+	}
+	t.Setenv("PATH", bin+string(filepath.ListSeparator)+os.Getenv("PATH"))
+	client, err := orcabridge.New(orcabridge.Options{Binary: filepath.Join(bin, "orca")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client, dir
+}
+
+func hasFlag(argv []string, flag, value string) bool {
+	for i := range len(argv) - 1 {
+		if argv[i] == flag && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPickupConcreteOrca(t *testing.T) {
+	c := newConcrete(t)
+	orca, calls := fakeOrca(t)
+	res, err := pickup.New(c.config(orca)).Run(t.Context(), pickup.Request{
+		Target: cli.ItemRef{SourceHostID: self, WorkspaceID: c.wt.ID},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	c.checkRestored(res)
+	wantOrca := &pickup.OrcaResult{ExecutionHostID: "local", WorktreeID: "repo-1::w9", Resumed: []pickup.ResumedTab{{SessionID: sid, TabID: "t9"}}, Dormant: []string{}}
+	if !reflect.DeepEqual(res.Orca, wantOrca) {
+		t.Errorf("Orca = %+v, want %+v", res.Orca, wantOrca)
+	}
+	if want := []pickup.Session{{SessionID: sid, Status: pickup.StatusResumed, Selected: true}}; !reflect.DeepEqual(res.Sessions, want) {
+		t.Errorf("Sessions = %+v, want %+v", res.Sessions, want)
+	}
+
+	argv := strings.Split(strings.TrimSuffix(read(t, filepath.Join(calls, "recovery-import.argv")), "\n"), "\n")
+	for _, flag := range [][2]string{
+		{"--checkout", res.Checkout.Path},
+		{"--checkpoint", res.Checkpoint.ID},
+		{"--path-map", c.src + "=" + res.Checkout.Path},
+		{"--resume", sid},
+	} {
+		if !hasFlag(argv, flag[0], flag[1]) {
+			t.Errorf("import argv = %q, want %s %s", argv, flag[0], flag[1])
+		}
+	}
+	if res.Checkpoint.ID == "" || !slices.Contains(argv, "--register-repo") || argv[len(argv)-1] != "--json" {
+		t.Errorf("import argv = %q, checkpoint %q; want a registered JSON import of a named checkpoint", argv, res.Checkpoint.ID)
+	}
+	if stdin := read(t, filepath.Join(calls, "recovery-import.stdin")); !strings.Contains(stdin, `"instanceId":"inst-1"`) {
+		t.Errorf("import stdin = %s, want the captured descriptor", stdin)
+	}
+	var launch map[string]orcabridge.RecoveryLaunch
+	if err := json.Unmarshal([]byte(read(t, filepath.Join(calls, "recovery-import.launch"))), &launch); err != nil {
+		t.Fatal(err)
+	}
+	if len(launch) != 1 || !strings.Contains(launch[sid].AppendSystemPrompt, "It now runs in "+res.Checkout.Path+" on this host.") {
+		t.Errorf("recovery launch = %+v, want the recovery system prompt keyed by %s", launch, sid)
 	}
 }
 
