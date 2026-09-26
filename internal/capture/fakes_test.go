@@ -145,6 +145,21 @@ func (f *fakeStore) deps(t *testing.T, ref artifact.Ref) []artifact.Ref {
 	return m.Deps
 }
 
+func (f *fakeStore) blob(t *testing.T, ref artifact.Ref) []byte {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, err := f.manifest(ref.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data []byte
+	for _, c := range m.Chunks {
+		data = append(data, f.objects[c.Digest]...)
+	}
+	return data
+}
+
 func (f *fakeStore) media(t *testing.T, ref artifact.Ref) string {
 	t.Helper()
 	f.mu.Lock()

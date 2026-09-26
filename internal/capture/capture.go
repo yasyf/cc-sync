@@ -102,6 +102,8 @@ type Targets interface {
 // artifact.DefaultClosureBound and a zero Limits takes reposync's defaults.
 type Config struct {
 	Self      string
+	Layout    claudenative.Layout
+	Home      string
 	Store     Store
 	Code      Code
 	Stamper   Stamper
@@ -409,6 +411,9 @@ func (j *Job) source(s claudenative.Session, now time.Time) sessionarchive.Sourc
 	src := sessionarchive.Source{
 		SessionID:      string(s.ID),
 		SourceHost:     j.cfg.Self,
+		Home:           j.cfg.Home,
+		TmpRoot:        j.cfg.Layout.TmpRoot,
+		UID:            j.cfg.Layout.UID,
 		ConfigDir:      config,
 		ProjectDirName: s.ProjectDirName,
 		TranscriptPath: s.TranscriptPath,

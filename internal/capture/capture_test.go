@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -53,6 +54,8 @@ func newHarness(t *testing.T) *harness {
 	}
 	h.job = New(Config{
 		Self:      self,
+		Layout:    claudenative.Layout{ConfigDir: config, TmpRoot: "/private/tmp/claude-501", UID: 501},
+		Home:      "/Users/src",
 		Store:     h.store,
 		Code:      h.code,
 		Stamper:   h.stamper,
@@ -144,6 +147,13 @@ func TestCaptureRecordsCheckpoint(t *testing.T) {
 	}
 	if h.store.media(t, cp.Root) != MediaCheckpoint || !slices.Equal(gotMedia, wantMedia) {
 		t.Fatalf("root %s deps media = %v, want %v", h.store.media(t, cp.Root), gotMedia, wantMedia)
+	}
+	var m sessionarchive.Manifest
+	if err := json.Unmarshal(h.store.blob(t, h.store.deps(t, deps[2])[0]), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Home != "/Users/src" || m.TmpRoot != "/private/tmp/claude-501" || m.UID != 501 {
+		t.Fatalf("session manifest home %q tmp root %q uid %d, want the source layout", m.Home, m.TmpRoot, m.UID)
 	}
 	if h.publisher.kicks != 1 {
 		t.Fatalf("publisher kicks = %d, want 1", h.publisher.kicks)
