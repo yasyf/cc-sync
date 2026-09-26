@@ -149,6 +149,28 @@ func (l *Lanes) Await(host, peer, what string, cond func(delivery.PeerStatus) bo
 	}
 }
 
+// AwaitIdle waits until host's lane to peer settles (WaitIdle) into a status
+// cond accepts, re-waiting through settled statuses cond rejects.
+func (l *Lanes) AwaitIdle(host, peer, what string, cond func(delivery.PeerStatus) bool) delivery.PeerStatus {
+	l.t.Helper()
+	ctx, cancel := context.WithTimeout(l.t.Context(), laneWait)
+	defer cancel()
+	for {
+		status, err := l.harness.WaitIdle(ctx, host, consumer.ServiceID, peer)
+		if err != nil {
+			l.t.Fatalf("%s -> %s never settled into %s: %v; last status %+v", host, peer, what, err, status)
+		}
+		if cond(status) {
+			return status
+		}
+		select {
+		case <-ctx.Done():
+			l.t.Fatalf("%s -> %s never settled into %s: %v; last status %+v", host, peer, what, ctx.Err(), status)
+		case <-time.After(lanePoll):
+		}
+	}
+}
+
 // Close stops every lane and waits for in-flight attempts to unwind.
 func (l *Lanes) Close() {
 	if l.closed {

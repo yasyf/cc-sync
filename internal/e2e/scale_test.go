@@ -170,7 +170,7 @@ func checkpointsByWorktree(snap catalog.Snapshot) map[string][]catalog.Checkpoin
 	return out
 }
 
-func checkpointIDs(snap catalog.Snapshot) map[string]bool {
+func checkpointSet(snap catalog.Snapshot) map[string]bool {
 	ids := map[string]bool{}
 	for _, cps := range checkpointsByWorktree(snap) {
 		for _, cp := range cps {
@@ -442,8 +442,8 @@ func TestScaleCoalescedDeliveryAndRedeliveryDedup(t *testing.T) {
 		if n := mesh.Link("host-a", p.Name).Calls(syncservice.MethodApplyV2); n != 1 {
 			t.Fatalf("start-up delivery to %s applied %d times, want 1", p.Name, n)
 		}
-		have := checkpointIDs(p.Catalog())
-		for id := range checkpointIDs(a.Catalog()) {
+		have := checkpointSet(p.Catalog())
+		for id := range checkpointSet(a.Catalog()) {
 			if !have[id] {
 				t.Fatalf("%s lacks checkpoint %s after start-up delivery", p.Name, id)
 			}
@@ -485,7 +485,7 @@ func TestScaleCoalescedDeliveryAndRedeliveryDedup(t *testing.T) {
 		if at := coalesced[p.Name].LastAttemptAt; at.Before(firstKick.Add(maxWait)) {
 			t.Fatalf("delivery to %s ran at %s, before the window closed at %s", p.Name, at, firstKick.Add(maxWait))
 		}
-		have := checkpointIDs(p.Catalog())
+		have := checkpointSet(p.Catalog())
 		for _, id := range fresh {
 			if !have[id] {
 				t.Fatalf("%s lacks coalesced checkpoint %s", p.Name, id)
