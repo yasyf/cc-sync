@@ -376,6 +376,7 @@ func TestScanRewrite(t *testing.T) {
 		return `{"type":"assistant","uuid":"` + uuid + `","cwd":"` + cwd + `","gitBranch":"` + branch + `","timestamp":"2026-09-26T10:00:00Z","message":{"content":[]}}` + "\n"
 	}
 	padding := strings.Repeat(record("pad0001", "/p", ""), 200)
+	metadata := strings.Repeat(`{"type":"system","subtype":"turn_duration","durationMs":1}`+"\n", 100)
 	tests := []struct {
 		name       string
 		before     string
@@ -396,6 +397,12 @@ func TestScanRewrite(t *testing.T) {
 			before:  padding + record("old001", "/p", "main"),
 			after:   padding + record("new001", "/p", "main"),
 			wantCwd: "/p", wantLeaf: "new001", wantBranch: "main", records: 201,
+		},
+		{
+			name:    "same-size rewrite between the boundary windows",
+			before:  metadata + record("mid001", "/old1", "old-branch") + metadata,
+			after:   metadata + record("mid001", "/new1", "new-branch") + metadata,
+			wantCwd: "/new1", wantLeaf: "mid001", wantBranch: "new-branch", records: 201,
 		},
 		{
 			name:    "rewrite of the first record under a grown tail",
@@ -433,6 +440,7 @@ func TestScanHistoryRewrite(t *testing.T) {
 	line := func(ms int64, hash string) string {
 		return `{"display":"x","pastedContents":{"1":{"id":1,"type":"text","contentHash":"` + hash + `"}},"project":"/p","sessionId":"` + sidA + `","timestamp":` + strconv.FormatInt(ms, 10) + "}\n"
 	}
+	other := strings.Repeat(`{"display":"y","pastedContents":{},"project":"/q","sessionId":"`+sidB+`","timestamp":1790400000000}`+"\n", 50)
 	tests := []struct {
 		name       string
 		before     string
@@ -444,6 +452,13 @@ func TestScanHistoryRewrite(t *testing.T) {
 			name:       "same-size rewrite",
 			before:     line(1790500000000, "oldhash1"),
 			after:      line(1790600000000, "newhash1"),
+			wantInput:  time.UnixMilli(1790600000000),
+			wantHashes: []string{"newhash1"},
+		},
+		{
+			name:       "same-size rewrite between the boundary windows",
+			before:     other + line(1790500000000, "oldhash1") + other,
+			after:      other + line(1790600000000, "newhash1") + other,
 			wantInput:  time.UnixMilli(1790600000000),
 			wantHashes: []string{"newhash1"},
 		},
@@ -521,6 +536,37 @@ func TestScanSidecarOnlyChanges(t *testing.T) {
 			},
 			want: SidecarSet{SessionDir: true, Subagents: 2, FileHistory: true, TaskLists: []string{"session-aaaaaaaa"}},
 		},
+		{
+			name: "tool result spilled into a new nested dir",
+			mutate: func(t *testing.T) {
+				writeFile(t, filepath.Join(sessionDir, "tool-results", "pdf-1", "page-01.jpg"), "x")
+			},
+			want: SidecarSet{SessionDir: true, Subagents: 2, ToolResults: 1, FileHistory: true, TaskLists: []string{"session-aaaaaaaa"}},
+		},
+		{
+			name: "page added to an existing nested tool result dir",
+			mutate: func(t *testing.T) {
+				writeFile(t, filepath.Join(sessionDir, "tool-results", "pdf-1", "page-02.jpg"), "x")
+			},
+			want: SidecarSet{SessionDir: true, Subagents: 2, ToolResults: 2, FileHistory: true, TaskLists: []string{"session-aaaaaaaa"}},
+		},
+		{
+			name: "page deleted from a nested tool result dir",
+			mutate: func(t *testing.T) {
+				if err := os.Remove(filepath.Join(sessionDir, "tool-results", "pdf-1", "page-02.jpg")); err != nil {
+					t.Fatalf("remove: %v", err)
+				}
+			},
+			want: SidecarSet{SessionDir: true, Subagents: 2, ToolResults: 1, FileHistory: true, TaskLists: []string{"session-aaaaaaaa"}},
+		},
+		{
+			name: "workflow manifest and script written",
+			mutate: func(t *testing.T) {
+				writeFile(t, filepath.Join(sessionDir, "workflows", "wf_1.json"), "{}")
+				writeFile(t, filepath.Join(sessionDir, "workflows", "scripts", "s.js"), "x")
+			},
+			want: SidecarSet{SessionDir: true, Subagents: 2, ToolResults: 1, Workflows: 1, FileHistory: true, TaskLists: []string{"session-aaaaaaaa"}},
+		},
 	}
 	for _, step := range steps {
 		step.mutate(t)
@@ -532,6 +578,36 @@ func TestScanSidecarOnlyChanges(t *testing.T) {
 		if fc.Inode != transcript.Inode || fc.Size != transcript.Size || !fc.ModTime.Equal(transcript.ModTime) || fc.ParsedOffset != transcript.ParsedOffset || fc.Boundary != transcript.Boundary || !reflect.DeepEqual(fc.Summary, transcript.Summary) {
 			t.Errorf("%s: transcript cursor moved: %+v, want %+v", step.name, fc, transcript)
 		}
+	}
+}
+
+func TestScanReadsOnlyChangedSidecarDirs(t *testing.T) {
+	l := testLayout(t)
+	path := TranscriptPath(l.ConfigDir, "/p", sidA)
+	writeFile(t, path, `{"type":"assistant","uuid":"a1","cwd":"/p","timestamp":"2026-09-26T10:00:00Z"}`+"\n")
+	sessionDir := filepath.Join(filepath.Dir(path), sidA)
+	unrelated := filepath.Join(sessionDir, "unrelated", "deep")
+	pdf := filepath.Join(sessionDir, "tool-results", "pdf-1")
+	mkdirs(t, unrelated, pdf)
+	writeFile(t, filepath.Join(sessionDir, "tool-results", "r1.txt"), "x")
+	if err := os.Chmod(unrelated, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := os.ReadDir(unrelated); err == nil {
+		t.Skip("directory permissions are not enforced for this user")
+	}
+	opts := ScanOptions{Layout: l}
+	sessions, cur := scan(t, opts, Cursor{})
+	if got := only(t, sessions).Sidecars; got.ToolResults != 1 {
+		t.Fatalf("initial ToolResults = %d, want 1", got.ToolResults)
+	}
+	if err := os.Chmod(pdf, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	writeFile(t, filepath.Join(sessionDir, "subagents", "agent-new.jsonl"), "{}\n")
+	sessions, _ = scan(t, opts, cur)
+	if got, want := only(t, sessions).Sidecars, (SidecarSet{SessionDir: true, Subagents: 1, ToolResults: 1}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Sidecars after a subagent-only change = %+v, want %+v", got, want)
 	}
 }
 

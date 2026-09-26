@@ -311,8 +311,8 @@ func boundaryDigest(f *os.File, offset int64) (Digest, error) {
 	return d, nil
 }
 
-func prefixIntact(f *os.File, size, offset int64, want Digest) (bool, error) {
-	if size < offset {
+func appendedTo(f *os.File, stamp, prev FileStamp, offset int64, want Digest) (bool, error) {
+	if !stamp.grewFrom(prev) {
 		return false, nil
 	}
 	got, err := boundaryDigest(f, offset)
