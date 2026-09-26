@@ -59,7 +59,8 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 		args = append([]string{"-C", dir}, args...)
 	}
 	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"GIT_AUTHOR_NAME=e2e", "GIT_AUTHOR_EMAIL=e2e@example.invalid",
 		"GIT_COMMITTER_NAME=e2e", "GIT_COMMITTER_EMAIL=e2e@example.invalid",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
@@ -221,6 +222,7 @@ func (s *Session) record(h *Host, kind string, turn Turn) map[string]any {
 	}
 	if kind == "user" {
 		rec["message"] = map[string]any{"role": "user", "content": turn.Text}
+		rec["origin"] = map[string]any{"kind": "human"}
 		rec["permissionMode"] = "default"
 		return rec
 	}
