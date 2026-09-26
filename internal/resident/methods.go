@@ -61,7 +61,7 @@ type KickReply struct {
 }
 
 // PinRequest is the ccsync.pin.v1 params. Empty roots release the owner's
-// pins; a zero TTL means PinTTL.
+// pins; a zero TTL means pickup.PinTTL.
 type PinRequest struct {
 	Owner string         `json:"owner"`
 	Roots []artifact.Ref `json:"roots"`

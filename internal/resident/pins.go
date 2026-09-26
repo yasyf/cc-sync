@@ -12,18 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yasyf/cc-sync/internal/pickup"
 	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/synckit/artifact"
 )
 
-const (
-	// PickupPinPrefix prefixes every owner ccsync.pin.v1 accepts.
-	PickupPinPrefix = "cc-sync/pickup/"
-	// PinTTL bounds how long a pickup pin outlives its last renewal.
-	PinTTL = 24 * time.Hour
-
-	pinsIdentity = "cc-sync-pins-v1"
-)
+const pinsIdentity = "cc-sync-pins-v1"
 
 // ErrPin refuses a ccsync.pin.v1 request outside the pickup contract.
 var ErrPin = errors.New("resident: invalid pin request")
@@ -52,17 +46,17 @@ type pins struct {
 }
 
 func (p *pins) Set(ctx context.Context, owner string, roots []artifact.Ref, ttl time.Duration) (Pin, error) {
-	if !strings.HasPrefix(owner, PickupPinPrefix) || len(owner) == len(PickupPinPrefix) {
-		return Pin{}, fmt.Errorf("%w: owner %q is not under %s", ErrPin, owner, PickupPinPrefix)
+	if !strings.HasPrefix(owner, pickup.PinOwnerPrefix) || len(owner) == len(pickup.PinOwnerPrefix) {
+		return Pin{}, fmt.Errorf("%w: owner %q is not under %s", ErrPin, owner, pickup.PinOwnerPrefix)
 	}
-	if ttl < 0 || ttl > PinTTL {
-		return Pin{}, fmt.Errorf("%w: ttl %s outside (0, %s]", ErrPin, ttl, PinTTL)
+	if ttl < 0 || ttl > pickup.PinTTL {
+		return Pin{}, fmt.Errorf("%w: ttl %s outside (0, %s]", ErrPin, ttl, pickup.PinTTL)
 	}
 	if err := artifact.ValidateRoots(roots); err != nil {
 		return Pin{}, fmt.Errorf("%w: %w", ErrPin, err)
 	}
 	if ttl == 0 {
-		ttl = PinTTL
+		ttl = pickup.PinTTL
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

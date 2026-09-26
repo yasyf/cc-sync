@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/pickup"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/codec"
 )
@@ -39,7 +40,7 @@ func (h *harness) reconcile(t *testing.T) {
 
 func TestPinExpiresAfterTTL(t *testing.T) {
 	h := newHarness(t)
-	const owner = PickupPinPrefix + "op1"
+	const owner = pickup.PinOwnerPrefix + "op1"
 	roots := []artifact.Ref{ref("a"), ref("b")}
 	t0 := h.clock.Now()
 
@@ -47,14 +48,14 @@ func TestPinExpiresAfterTTL(t *testing.T) {
 	if errText != "" {
 		t.Fatalf("pin: %s", errText)
 	}
-	if want := (Pin{Owner: owner, Roots: 2, ExpiresAt: t0.Add(PinTTL)}); got != want {
+	if want := (Pin{Owner: owner, Roots: 2, ExpiresAt: t0.Add(pickup.PinTTL)}); got != want {
 		t.Fatalf("pin = %+v, want %+v", got, want)
 	}
 	if !reflect.DeepEqual(h.store.pinned(owner), roots) {
 		t.Fatalf("store pins[%s] = %v, want %v", owner, h.store.pinned(owner), roots)
 	}
 
-	h.clock.advance(PinTTL - time.Second)
+	h.clock.advance(pickup.PinTTL - time.Second)
 	h.reconcile(t)
 	if !reflect.DeepEqual(h.store.pinned(owner), roots) {
 		t.Fatalf("pins swept before expiry: %v", h.store.pinned(owner))
@@ -78,7 +79,7 @@ func TestPinExpiresAfterTTL(t *testing.T) {
 
 func TestPinRenewalAndRelease(t *testing.T) {
 	h := newHarness(t)
-	const owner = PickupPinPrefix + "op1"
+	const owner = pickup.PinOwnerPrefix + "op1"
 	t0 := h.clock.Now()
 	if _, errText := h.pin(t, PinRequest{Owner: owner, Roots: []artifact.Ref{ref("a")}, TTL: codec.Duration(time.Hour)}); errText != "" {
 		t.Fatal(errText)
@@ -117,11 +118,11 @@ func TestPinRefusals(t *testing.T) {
 		want   string
 	}{
 		{name: "catalog owner", params: map[string]any{"owner": consumer.PinOwner, "roots": []artifact.Ref{ref("a")}}, want: ErrPin.Error()},
-		{name: "bare prefix", params: map[string]any{"owner": PickupPinPrefix, "roots": []artifact.Ref{ref("a")}}, want: ErrPin.Error()},
-		{name: "ttl past a day", params: map[string]any{"owner": PickupPinPrefix + "op", "roots": []artifact.Ref{ref("a")}, "ttl": "25h"}, want: ErrPin.Error()},
-		{name: "negative ttl", params: map[string]any{"owner": PickupPinPrefix + "op", "roots": []artifact.Ref{ref("a")}, "ttl": "-1s"}, want: ErrPin.Error()},
-		{name: "invalid root", params: map[string]any{"owner": PickupPinPrefix + "op", "roots": []artifact.Ref{{Digest: "zz", Kind: artifact.KindBlob}}}, want: ErrPin.Error()},
-		{name: "unknown field", params: map[string]any{"owner": PickupPinPrefix + "op", "expires": "1h"}, want: "unknown field"},
+		{name: "bare prefix", params: map[string]any{"owner": pickup.PinOwnerPrefix, "roots": []artifact.Ref{ref("a")}}, want: ErrPin.Error()},
+		{name: "ttl past a day", params: map[string]any{"owner": pickup.PinOwnerPrefix + "op", "roots": []artifact.Ref{ref("a")}, "ttl": "25h"}, want: ErrPin.Error()},
+		{name: "negative ttl", params: map[string]any{"owner": pickup.PinOwnerPrefix + "op", "roots": []artifact.Ref{ref("a")}, "ttl": "-1s"}, want: ErrPin.Error()},
+		{name: "invalid root", params: map[string]any{"owner": pickup.PinOwnerPrefix + "op", "roots": []artifact.Ref{{Digest: "zz", Kind: artifact.KindBlob}}}, want: ErrPin.Error()},
+		{name: "unknown field", params: map[string]any{"owner": pickup.PinOwnerPrefix + "op", "expires": "1h"}, want: "unknown field"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
