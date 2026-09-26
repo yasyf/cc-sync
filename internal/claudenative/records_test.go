@@ -65,7 +65,7 @@ func TestClassifyRecord(t *testing.T) {
 		{
 			name:   "queue enqueue",
 			line:   `{"type":"queue-operation","operation":"enqueue","content":"next","timestamp":"2026-09-26T19:00:00Z","sessionId":"s"}`,
-			want:   ActivityHuman,
+			want:   ActivityNone,
 			wantAt: at,
 		},
 		{
@@ -75,8 +75,36 @@ func TestClassifyRecord(t *testing.T) {
 			wantAt: at,
 		},
 		{name: "assistant", line: `{"type":"assistant","message":{"content":[]},"timestamp":"2026-09-26T19:00:00Z"}`, want: ActivityAutonomous, wantAt: at},
-		{name: "system", line: `{"type":"system","subtype":"turn_duration","timestamp":"2026-09-26T19:00:00Z"}`, want: ActivityAutonomous, wantAt: at},
-		{name: "attachment", line: `{"type":"attachment","attachment":{"type":"plan_mode"},"timestamp":"2026-09-26T19:00:00Z"}`, want: ActivityAutonomous, wantAt: at},
+		{
+			name:   "queued human prompt",
+			line:   `{"type":"attachment","uuid":"q1","timestamp":"2026-09-26T19:00:00Z","attachment":{"type":"queued_command","prompt":"next","commandMode":"prompt","origin":{"kind":"human"}}}`,
+			want:   ActivityHuman,
+			wantAt: at,
+		},
+		{
+			name:   "queued human meta prompt",
+			line:   `{"type":"attachment","uuid":"q1","timestamp":"2026-09-26T19:00:00Z","attachment":{"type":"queued_command","prompt":"next","commandMode":"prompt","isMeta":true,"origin":{"kind":"human"}}}`,
+			want:   ActivityNone,
+			wantAt: at,
+		},
+		{
+			name:   "queued task notification",
+			line:   `{"type":"attachment","uuid":"q1","timestamp":"2026-09-26T19:00:00Z","attachment":{"type":"queued_command","prompt":"<task-notification/>","commandMode":"task-notification"}}`,
+			want:   ActivityAutonomous,
+			wantAt: at,
+		},
+		{
+			name:   "queued peer message",
+			line:   `{"type":"attachment","uuid":"q1","timestamp":"2026-09-26T19:00:00Z","attachment":{"type":"queued_command","prompt":"hi","commandMode":"prompt","isMeta":true,"origin":{"kind":"peer"}}}`,
+			want:   ActivityAutonomous,
+			wantAt: at,
+		},
+		{
+			name:   "scheduled task fire",
+			line:   `{"type":"system","subtype":"scheduled_task_fire","content":"fired","isMeta":true,"timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityAutonomous,
+			wantAt: at,
+		},
 		{name: "last-prompt", line: `{"type":"last-prompt","lastPrompt":"p","leafUuid":"u","sessionId":"s"}`, want: ActivityNone},
 		{name: "ai-title", line: `{"type":"ai-title","aiTitle":"t","sessionId":"s"}`, want: ActivityNone},
 		{name: "custom-title", line: `{"type":"custom-title","customTitle":"t","sessionId":"s"}`, want: ActivityNone},
@@ -85,6 +113,8 @@ func TestClassifyRecord(t *testing.T) {
 		{name: "agent-name", line: `{"type":"agent-name","agentName":"a","sessionId":"s"}`, want: ActivityNone},
 		{name: "worktree-state", line: `{"type":"worktree-state","worktreeSession":null,"sessionId":"s"}`, want: ActivityNone},
 		{name: "file-history-snapshot", line: `{"type":"file-history-snapshot","messageId":"m","snapshot":{}}`, want: ActivityNone},
+		{name: "cost-state", line: `{"type":"cost-state","sessionId":"s"}`, want: ActivityNone},
+		{name: "permission-mode", line: `{"type":"permission-mode","permissionMode":"default","sessionId":"s"}`, want: ActivityNone},
 		{name: "invalid json", line: `{"type":"user"`, wantErr: true},
 		{name: "not an object", line: `["user"]`, wantErr: true},
 		{name: "bad timestamp", line: `{"type":"assistant","timestamp":"yesterday"}`, wantErr: true},
@@ -104,6 +134,33 @@ func TestClassifyRecord(t *testing.T) {
 			if got != tt.want || !gotAt.Equal(tt.wantAt) {
 				t.Errorf("ClassifyRecord() = %v, %v, want %v, %v", got, gotAt, tt.want, tt.wantAt)
 			}
+		})
+	}
+}
+
+func TestClassifyMetadataRecords(t *testing.T) {
+	at := time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC)
+	check := func(t *testing.T, line string) {
+		t.Helper()
+		got, gotAt, err := ClassifyRecord([]byte(line))
+		if err != nil {
+			t.Fatalf("ClassifyRecord() error = %v", err)
+		}
+		if got != ActivityNone || !gotAt.Equal(at) {
+			t.Errorf("ClassifyRecord() = %v, %v, want %v, %v", got, gotAt, ActivityNone, at)
+		}
+	}
+	for _, subtype := range []string{"turn_duration", "stop_hook_summary", "compact_boundary", "away_summary", "local_command", "informational"} {
+		t.Run("system "+subtype, func(t *testing.T) {
+			check(t, `{"type":"system","subtype":"`+subtype+`","isMeta":false,"timestamp":"2026-09-26T19:00:00Z"}`)
+		})
+	}
+	for _, kind := range []string{
+		"prompt_snapshot", "environment", "session_context", "skill_listing", "deferred_tools_delta", "deferred_tools_record",
+		"agent_listing_delta", "credential_org", "plan_mode", "async_hook_response", "hook_success", "task_reminder", "edited_text_file",
+	} {
+		t.Run("attachment "+kind, func(t *testing.T) {
+			check(t, `{"type":"attachment","uuid":"m1","timestamp":"2026-09-26T19:00:00Z","attachment":{"type":"`+kind+`"}}`)
 		})
 	}
 }
