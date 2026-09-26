@@ -37,6 +37,42 @@ func (f *fakeInventory) Scan(context.Context) ([]Unit, error) {
 	return out, nil
 }
 
+type stallingInventory struct {
+	*fakeInventory
+	stallAt int
+	entered chan time.Time
+
+	mu       sync.Mutex
+	scans    int
+	observed error
+}
+
+func newStallingInventory(stallAt int, units ...Unit) *stallingInventory {
+	return &stallingInventory{fakeInventory: newInventory(units...), stallAt: stallAt, entered: make(chan time.Time, 1)}
+}
+
+func (f *stallingInventory) Scan(ctx context.Context) ([]Unit, error) {
+	f.mu.Lock()
+	f.scans++
+	stall := f.scans == f.stallAt
+	f.mu.Unlock()
+	if !stall {
+		return f.fakeInventory.Scan(ctx)
+	}
+	f.entered <- time.Now()
+	<-ctx.Done()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.observed = ctx.Err()
+	return nil, ctx.Err()
+}
+
+func (f *stallingInventory) state() (scans int, observed error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scans, f.observed
+}
+
 func (f *fakeInventory) update(id string, fn func(*Unit)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -187,14 +223,36 @@ func startWith(t *testing.T, cfg Config, inv Inventory, stamper Stamper, capt Ca
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- s.Run(context.Background()) }()
+	go func() { errc <- s.Run(ctx) }()
 	return s, func() {
 		t.Helper()
-		s.Stop()
+		defer cancel()
+		stopWithin(t, s, cancel)
 		if err := <-errc; err != nil {
 			t.Fatalf("Run() = %v, want nil", err)
 		}
+	}
+}
+
+func stopWithin(t *testing.T, s *Scheduler, rescue context.CancelFunc) {
+	t.Helper()
+	t0 := time.Now()
+	done := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		if d := time.Since(t0); d != 0 {
+			t.Errorf("Stop() returned after %v, want at once", d)
+		}
+	case <-time.After(time.Hour):
+		t.Errorf("Stop() still blocked after 1h")
+		rescue()
+		<-done
 	}
 }
 
@@ -704,6 +762,107 @@ func TestRunReturnsContextError(t *testing.T) {
 		cancel()
 		if err := <-errc; !errors.Is(err, context.Canceled) {
 			t.Errorf("Run() = %v, want context.Canceled", err)
+		}
+		stopWithin(t, s, cancel)
+	})
+}
+
+func TestStopCancelsBlockedScan(t *testing.T) {
+	tests := []struct {
+		name    string
+		stallAt int
+		kick    bool
+		wantAt  time.Duration
+	}{
+		{"initial", 1, false, 0},
+		{"periodic", 2, false, 30 * time.Second},
+		{"kick", 2, true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				inv := newStallingInventory(tt.stallAt, unit("wt", "r", Session{ID: "s", LastActivity: ago(2 * time.Hour)}))
+				t0 := time.Now()
+				s, stop := start(t, Config{}, inv, newCapturer(), &fakePublisher{})
+				kicked := make(chan error, 1)
+				if tt.kick {
+					go func() {
+						_, err := s.Kick(context.Background(), "s")
+						kicked <- err
+					}()
+				}
+				if at := <-inv.entered; at.Sub(t0) != tt.wantAt {
+					t.Errorf("scan stalled at %v, want %v", at.Sub(t0), tt.wantAt)
+				}
+				stop()
+
+				if _, observed := inv.state(); !errors.Is(observed, context.Canceled) {
+					t.Errorf("stalled scan observed %v, want context.Canceled", observed)
+				}
+				if tt.kick {
+					if err := <-kicked; !errors.Is(err, ErrStopped) {
+						t.Errorf("Kick(s) error = %v, want ErrStopped", err)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestStopBeforeRun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		inv := newStallingInventory(0, unit("wt", "r"))
+		capt := newCapturer()
+		s, err := New(Config{}, inv, newStamper(), capt, &fakePublisher{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t0 := time.Now()
+		stopped := make(chan struct{})
+		go func() {
+			s.Stop()
+			close(stopped)
+		}()
+		synctest.Wait()
+		select {
+		case <-stopped:
+		default:
+			t.Error("Stop() before Run blocked, want it to return at once")
+		}
+
+		errc := make(chan error, 1)
+		go func() { errc <- s.Run(context.Background()) }()
+		if err := <-errc; err != nil {
+			t.Errorf("Run() after Stop = %v, want nil", err)
+		}
+		<-stopped
+		if d := time.Since(t0); d != 0 {
+			t.Errorf("Stop then Run took %v, want no time", d)
+		}
+		if scans, _ := inv.state(); scans != 0 {
+			t.Errorf("scans = %d, want none after Stop", scans)
+		}
+		if n := len(capt.snapshot()); n != 0 {
+			t.Errorf("captures = %d, want none after Stop", n)
+		}
+	})
+}
+
+func TestStopTwice(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, err := New(Config{}, newInventory(unit("wt", "r")), newStamper(), newCapturer(), &fakePublisher{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errc := make(chan error, 1)
+		go func() { errc <- s.Run(ctx) }()
+		time.Sleep(time.Minute)
+		stopWithin(t, s, cancel)
+		stopWithin(t, s, cancel)
+		if err := <-errc; err != nil {
+			t.Errorf("Run() = %v, want nil", err)
 		}
 	})
 }
