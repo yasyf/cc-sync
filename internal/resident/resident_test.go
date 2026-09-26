@@ -16,6 +16,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/cc-sync/internal/version"
+	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/syncservice"
 )
@@ -97,6 +98,41 @@ func TestStatusMethod(t *testing.T) {
 	units := got.Scheduler.Units
 	if len(units) != 1 || units[0].WorktreeID != "wt1" || units[0].Last == nil || units[0].Last.Checkpoint != "cp-wt1" {
 		t.Errorf("status scheduler units = %+v, want wt1 last captured as cp-wt1", units)
+	}
+}
+
+func TestStatusCountsPickupReadyCheckpoints(t *testing.T) {
+	h := newHarness(t)
+	complete := catalog.Completeness{Complete: true}
+	checkpoints := map[string]catalog.Checkpoint{
+		"wt-complete": {Completeness: complete},
+		"wt-omitted":  {Completeness: complete, Omitted: []catalog.OmittedBinding{{Agent: "codex", Key: "session_id", ID: "c-1", Reason: "agent-not-supported-v1"}}},
+		"wt-mixed":    {Completeness: complete, Deferred: "deferred:missing-lfs"},
+		"wt-partial":  {Completeness: catalog.Completeness{Missing: []string{"session:s1"}}},
+	}
+	for id, cp := range checkpoints {
+		cp.Root = artifact.Ref{Digest: artifact.Sum([]byte(id)), Kind: artifact.KindManifest, Size: 100}
+		cp.CapturedAt, cp.SourceActivityAt = h.clock.Now(), h.clock.Now()
+		wt := catalog.Worktree{ID: id, Repo: catalog.Repo{Origin: "git@github.com:me/" + id + ".git", SourcePath: "/src/" + id}}
+		if _, err := h.capture.Catalog.Record(t.Context(), wt, cp); err != nil {
+			t.Fatalf("Record %s: %v", id, err)
+		}
+	}
+	raw, errText := h.call(t, MethodStatus, map[string]any{})
+	if errText != "" {
+		t.Fatalf("status: %s", errText)
+	}
+	var got StatusReply
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := h.capture.Catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []OriginStatus{{Origin: "me@host", Revision: snapshot.Origins[0].Revision, Worktrees: 4, Checkpoints: 4, Ready: 2}}
+	if !reflect.DeepEqual(got.Catalog.Origins, want) {
+		t.Errorf("status catalog origins = %+v, want %+v", got.Catalog.Origins, want)
 	}
 }
 
