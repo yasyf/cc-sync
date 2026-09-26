@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "ok": true,
+  "checkout": {
+    "path": "",
+    "branch": null,
+    "reused": false
+  },
+  "sessions": [],
+  "orca": {
+    "execution_host_id": "local",
+    "worktree_id": "orca-wt-9",
+    "resumed": [],
+    "dormant": []
+  }
+}

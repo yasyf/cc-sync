@@ -1,0 +1,3 @@
+SELECTOR          SOURCE               REPO      BRANCH        SESSIONS  CAPTURED              STATE
+host-mbp/wt-7f3a  Yasyf's MacBook Pro  monorepo  feature/sync  2         2026-09-26T19:00:00Z  ready
+host-mini/wt-01   mini                 scratch   (detached)    0         2026-09-26T16:00:00Z  missing lfs:assets/model.bin, submodule:vendor/lib; paused: cellular (peer) since 2026-09-26T18:00:00Z

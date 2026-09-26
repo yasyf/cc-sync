@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "ok": true,
+  "helper": {
+    "running": false,
+    "build": ""
+  },
+  "local": {
+    "host_id": "",
+    "host_name": "",
+    "network": {
+      "status": "unknown",
+      "expensive": false,
+      "constrained": false,
+      "cellular": false,
+      "manual_metered": false
+    }
+  },
+  "peers": [],
+  "scheduler": {
+    "queued_by_tier": {
+      "human": 0,
+      "autonomous": 0,
+      "recent": 0,
+      "idle": 0
+    },
+    "workers": 0,
+    "last_round_at": null
+  }
+}

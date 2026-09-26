@@ -8,7 +8,7 @@ Recover Claude Code sessions, their uncommitted Git work, and Orca workspace lay
 cc-sync/
 ├── cmd/cc-sync/           # main package — the CLI entry point
 ├── internal/
-│   ├── cli/               # cobra command tree (root + the `hello` starter)
+│   ├── cli/               # cobra command tree, JSON output contract, selectors
 │   ├── version/           # build version, stamped via -ldflags
 │   └── log/               # slog setup
 ├── .github/               # GitHub Actions workflows

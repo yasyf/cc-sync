@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "ok": true,
+  "config_dir": "/Users/yasyf/.config/cc-sync",
+  "synckitd": true,
+  "helper": {
+    "running": true,
+    "build": "v0.1.0"
+  }
+}

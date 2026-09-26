@@ -1,0 +1,234 @@
+package cli_test
+
+import (
+	"bytes"
+	"context"
+	"time"
+
+	"github.com/yasyf/cc-sync/internal/cli"
+)
+
+type fakeService struct {
+	install   cli.InstallResult
+	uninstall cli.UninstallResult
+	list      cli.ListResult
+	inspect   cli.InspectResult
+	status    cli.StatusResult
+	sync      cli.SyncResult
+	pickup    cli.PickupResult
+	resume    cli.ResumeResult
+	err       error
+	phases    []cli.Progress
+	block     chan struct{}
+	got       any
+}
+
+func (f *fakeService) Install(_ context.Context, req cli.InstallRequest) (cli.InstallResult, error) {
+	f.got = req
+	return f.install, f.err
+}
+
+func (f *fakeService) Uninstall(_ context.Context, req cli.UninstallRequest) (cli.UninstallResult, error) {
+	f.got = req
+	return f.uninstall, f.err
+}
+
+func (f *fakeService) List(_ context.Context, req cli.ListRequest) (cli.ListResult, error) {
+	f.got = req
+	return f.list, f.err
+}
+
+func (f *fakeService) Inspect(_ context.Context, req cli.InspectRequest) (cli.InspectResult, error) {
+	f.got = req
+	return f.inspect, f.err
+}
+
+func (f *fakeService) Status(context.Context) (cli.StatusResult, error) {
+	return f.status, f.err
+}
+
+func (f *fakeService) Sync(_ context.Context, req cli.SyncRequest) (cli.SyncResult, error) {
+	f.got = req
+	return f.sync, f.err
+}
+
+func (f *fakeService) Pickup(ctx context.Context, req cli.PickupRequest) (cli.PickupResult, error) {
+	for _, p := range f.phases {
+		req.Progress(p)
+	}
+	req.Progress = nil
+	f.got = req
+	if f.block != nil {
+		close(f.block)
+		<-ctx.Done()
+		return cli.PickupResult{}, ctx.Err()
+	}
+	return f.pickup, f.err
+}
+
+func (f *fakeService) Resume(_ context.Context, req cli.ResumeRequest) (cli.ResumeResult, error) {
+	f.got = req
+	return f.resume, f.err
+}
+
+func (f *fakeService) HelperServe(context.Context) error {
+	return f.err
+}
+
+type result struct {
+	exit   int
+	stdout string
+	stderr string
+}
+
+func run(svc cli.Service, args ...string) result {
+	var stdout, stderr bytes.Buffer
+	exit := cli.New(svc).Run(context.Background(), args, &stdout, &stderr)
+	return result{exit: exit, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+var pdt = time.FixedZone("PDT", -7*60*60)
+
+func ts(hour, minute int) cli.Time {
+	return cli.At(time.Date(2026, 9, 26, hour, minute, 0, 0, pdt))
+}
+
+func tsp(hour, minute int) *cli.Time {
+	t := ts(hour, minute)
+	return &t
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func fullItem() cli.Item {
+	return cli.Item{
+		Source: cli.Source{
+			Host:       cli.Host{HostID: "host-mbp", HostName: "Yasyf's MacBook Pro"},
+			LastSeenAt: tsp(12, 5),
+			Reachable:  true,
+		},
+		Workspace: cli.Workspace{
+			ID:         "wt-7f3a",
+			RepoName:   "monorepo",
+			RepoOrigin: ptr("git@github.com:yasyf/monorepo.git"),
+			Branch:     ptr("feature/sync"),
+			SourcePath: "/Users/yasyf/Code/monorepo",
+			Orca:       &cli.OrcaWorkspace{Kind: cli.OrcaWorktree, Name: "sync", InstanceID: "inst-1"},
+		},
+		Sessions: []cli.Session{
+			{
+				SessionID:           "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90",
+				Title:               "Wire the picker",
+				LastActivityAt:      tsp(12, 4),
+				LastHumanActivityAt: tsp(12, 3),
+				Activity:            cli.ActivityHuman,
+				BoundInOrca:         true,
+			},
+			{
+				SessionID:          "7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e",
+				Title:              "Background refactor",
+				LastActivityAt:     tsp(11, 30),
+				Activity:           cli.ActivityAutonomous,
+				LiveLocalCollision: true,
+			},
+		},
+		Checkpoint: cli.Checkpoint{
+			ID:               "c0ffee1234",
+			Tier:             cli.TierLatest,
+			CapturedAt:       cli.At(time.Date(2026, 9, 26, 12, 0, 0, 500_000_000, pdt)),
+			SourceActivityAt: tsp(12, 4),
+		},
+		CheckpointCount: 3,
+		Completeness: cli.Completeness{
+			Ready:      true,
+			Missing:    []string{},
+			Transcript: cli.TranscriptComplete,
+			Code:       cli.CodeComplete,
+			Layout:     cli.LayoutClientView,
+		},
+		LocalCheckout: &cli.LocalCheckout{Path: "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200", Reusable: true},
+	}
+}
+
+func sparseItem() cli.Item {
+	return cli.Item{
+		Source:    cli.Source{Host: cli.Host{HostID: "host-mini", HostName: "mini"}},
+		Workspace: cli.Workspace{ID: "wt-01", RepoName: "scratch", SourcePath: "/Users/yasyf/scratch"},
+		Checkpoint: cli.Checkpoint{
+			ID:         "abc123",
+			Tier:       cli.TierDaily,
+			CapturedAt: ts(9, 0),
+		},
+		CheckpointCount: 1,
+		Completeness: cli.Completeness{
+			Missing:    []string{"lfs:assets/model.bin", "submodule:vendor/lib"},
+			Transcript: cli.TranscriptPartial,
+			Code:       cli.CodeMissing,
+			Layout:     cli.LayoutNone,
+		},
+		Pause: &cli.Pause{Reason: cli.PauseCellular, Endpoint: cli.EndpointPeer, Since: ts(11, 0)},
+	}
+}
+
+func fullStatus() cli.StatusResult {
+	return cli.StatusResult{
+		Helper: cli.Helper{Running: true, Build: "v0.1.0"},
+		Local: cli.LocalHost{
+			Host:    cli.Host{HostID: "host-air", HostName: "air"},
+			Network: cli.Network{Status: cli.NetworkConnected, Expensive: true, Cellular: true},
+		},
+		Peers: []cli.Peer{
+			{
+				Host:            cli.Host{HostID: "host-mbp", HostName: "mbp"},
+				Reachable:       true,
+				LastSeenAt:      tsp(12, 5),
+				AckedRevision:   ptr(uint64(41)),
+				PendingRevision: ptr(uint64(42)),
+				PendingSince:    tsp(12, 1),
+				Pause:           &cli.Pause{Reason: cli.PauseCellular, Endpoint: cli.EndpointLocal, Since: ts(11, 55)},
+			},
+			{Host: cli.Host{HostID: "host-mini", HostName: "mini"}},
+		},
+		Scheduler: cli.Scheduler{
+			QueuedByTier: cli.QueuedByTier{Human: 1, Autonomous: 2, Recent: 3, Idle: 4},
+			Workers:      2,
+			LastRoundAt:  tsp(12, 6),
+		},
+	}
+}
+
+func fullInspect() cli.InspectResult {
+	return cli.InspectResult{
+		Item: fullItem(),
+		Checkpoints: []cli.CheckpointDetail{
+			{ID: "c0ffee1234", Tier: cli.TierLatest, CapturedAt: ts(12, 0), Ready: true},
+			{ID: "beef5678", Tier: cli.TierHourly, CapturedAt: ts(11, 0), Missing: []string{"session:7a1e4c2b"}, Deferred: []string{"worktree busy"}},
+		},
+		Delivery: []cli.Delivery{
+			{Peer: "host-air", State: cli.DeliveryIdle},
+			{Peer: "host-mini", State: cli.DeliveryPaused, Pause: &cli.Pause{Reason: cli.PausePeerOffline, Endpoint: cli.EndpointPeer, Since: ts(10, 0)}},
+		},
+	}
+}
+
+func orcaPickup() cli.PickupResult {
+	return cli.PickupResult{
+		Checkout: cli.PickupCheckout{Path: "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200", Branch: ptr("feature/sync")},
+		Sessions: []cli.PickedSession{
+			{SessionID: "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90", Status: cli.SessionResumed},
+			{SessionID: "7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e", Status: cli.SessionDormant},
+		},
+		Orca: &cli.OrcaPickup{
+			WorktreeID: "orca-wt-9",
+			Resumed:    []cli.ResumedTab{{SessionID: "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90", TabID: "tab-1"}},
+			Dormant:    []string{"7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e"},
+		},
+	}
+}
+
+func cliOnlyPickup() cli.PickupResult {
+	return cli.PickupResult{
+		Checkout: cli.PickupCheckout{Path: "/Users/yasyf/Code/monorepo-recovered", Reused: true},
+		Sessions: []cli.PickedSession{{SessionID: "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90", Status: cli.SessionRestored}},
+	}
+}
