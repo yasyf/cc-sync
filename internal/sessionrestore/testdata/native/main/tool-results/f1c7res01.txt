@@ -1,0 +1,4 @@
+{{SRC_CWD}}:
+total 8
+-rw-r--r--  1 fixture  staff  18 Jan  2 03:04 notes ü.txt
+drwxr-xr-x  2 fixture  staff  64 Jan  2 03:04 vendored (copy)
