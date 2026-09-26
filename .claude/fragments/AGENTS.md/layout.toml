@@ -1,0 +1,15 @@
+fragments = [
+  "cc-sync-development-guide",
+  "cc-skills:ask-before-assuming",
+  "cc-skills:code-review-response",
+  "cc-skills:parallelize",
+  "cc-skills:writing-plans",
+  "cc-skills:ccx",
+  "cc-sync-style",
+  "cc-sync-hook-style",
+  "cc-skills:version-control",
+  "releases",
+]
+
+[sources.cc-skills]
+source = "github:yasyf/cc-skills@main"
