@@ -1,14 +1,16 @@
 package scheduler
 
 import (
+	"cmp"
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 )
 
-const (
-	humanWindow  = 15 * time.Minute
-	recentWindow = time.Hour
-)
+// ErrInvalidTiers reports Tiers with a non-positive duration or an activity
+// window wider than the recent window.
+var ErrInvalidTiers = errors.New("invalid capture tiers")
 
 // Tier ranks a unit's capture urgency; a lower Tier is more urgent and is dispatched first.
 type Tier int
@@ -21,13 +23,7 @@ const (
 	TierIdle
 )
 
-var (
-	tierIntervals = [...]time.Duration{2 * time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour}
-	tierNames     = [...]string{"human", "autonomous", "recent", "idle"}
-)
-
-// Interval is how often a unit in the tier comes due.
-func (t Tier) Interval() time.Duration { return tierIntervals[t] }
+var tierNames = [...]string{"human", "autonomous", "recent", "idle"}
 
 // String names the tier as `cc-sync status` spells it.
 func (t Tier) String() string { return tierNames[t] }
@@ -35,21 +31,95 @@ func (t Tier) String() string { return tierNames[t] }
 // MarshalText renders the tier by name in JSON status output.
 func (t Tier) MarshalText() ([]byte, error) { return []byte(t.String()), nil }
 
+// Tiers sets how often a unit in each tier comes due and how recent activity
+// must be to earn the human, autonomous, and recent tiers.
+type Tiers struct {
+	HumanInterval      time.Duration
+	AutonomousInterval time.Duration
+	RecentInterval     time.Duration
+	IdleInterval       time.Duration
+	HumanWindow        time.Duration
+	AutonomousWindow   time.Duration
+	RecentWindow       time.Duration
+}
+
+// DefaultTiers is the approved cadence: human input or focus within 15m
+// captures every 2m, autonomous activity within 15m every 5m, any activity
+// within 1h every 15m, anything older hourly.
+func DefaultTiers() Tiers {
+	return Tiers{
+		HumanInterval:      2 * time.Minute,
+		AutonomousInterval: 5 * time.Minute,
+		RecentInterval:     15 * time.Minute,
+		IdleInterval:       time.Hour,
+		HumanWindow:        15 * time.Minute,
+		AutonomousWindow:   15 * time.Minute,
+		RecentWindow:       time.Hour,
+	}
+}
+
+// Validate reports ErrInvalidTiers unless every duration is positive and the
+// human and autonomous windows fit within the recent window.
+func (t Tiers) Validate() error {
+	for _, f := range []struct {
+		name string
+		d    time.Duration
+	}{
+		{"human_interval", t.HumanInterval},
+		{"autonomous_interval", t.AutonomousInterval},
+		{"recent_interval", t.RecentInterval},
+		{"idle_interval", t.IdleInterval},
+		{"human_window", t.HumanWindow},
+		{"autonomous_window", t.AutonomousWindow},
+		{"recent_window", t.RecentWindow},
+	} {
+		if f.d <= 0 {
+			return fmt.Errorf("%w: %s %v is not positive", ErrInvalidTiers, f.name, f.d)
+		}
+	}
+	if t.HumanWindow > t.RecentWindow {
+		return fmt.Errorf("%w: human_window %v exceeds recent_window %v", ErrInvalidTiers, t.HumanWindow, t.RecentWindow)
+	}
+	if t.AutonomousWindow > t.RecentWindow {
+		return fmt.Errorf("%w: autonomous_window %v exceeds recent_window %v", ErrInvalidTiers, t.AutonomousWindow, t.RecentWindow)
+	}
+	return nil
+}
+
+// Interval is how often a unit in tier comes due.
+func (t Tiers) Interval(tier Tier) time.Duration {
+	return [...]time.Duration{t.HumanInterval, t.AutonomousInterval, t.RecentInterval, t.IdleInterval}[tier]
+}
+
 // Classify maps a unit's latest activity to its tier and capture interval:
-// human input or focus within 15m captures every 2m, autonomous activity
-// within 15m every 5m, any activity within 1h every 15m, anything older
-// hourly. A zero time means no such activity.
-func Classify(now, lastHuman, lastHumanFocus, lastAutonomous, lastAny time.Time) (Tier, time.Duration) {
+// human input or focus within HumanWindow earns TierHuman, autonomous
+// activity within AutonomousWindow TierAutonomous, any activity within
+// RecentWindow TierRecent, anything older TierIdle. A zero time means no such
+// activity.
+func (t Tiers) Classify(now, lastHuman, lastHumanFocus, lastAutonomous, lastAny time.Time) (Tier, time.Duration) {
 	tier := TierIdle
 	switch {
-	case within(now, humanWindow, lastHuman, lastHumanFocus):
+	case within(now, t.HumanWindow, lastHuman, lastHumanFocus):
 		tier = TierHuman
-	case within(now, humanWindow, lastAutonomous):
+	case within(now, t.AutonomousWindow, lastAutonomous):
 		tier = TierAutonomous
-	case within(now, recentWindow, lastHuman, lastHumanFocus, lastAutonomous, lastAny):
+	case within(now, t.RecentWindow, lastHuman, lastHumanFocus, lastAutonomous, lastAny):
 		tier = TierRecent
 	}
-	return tier, tier.Interval()
+	return tier, t.Interval(tier)
+}
+
+func (t Tiers) orDefaults() Tiers {
+	d := DefaultTiers()
+	return Tiers{
+		HumanInterval:      cmp.Or(t.HumanInterval, d.HumanInterval),
+		AutonomousInterval: cmp.Or(t.AutonomousInterval, d.AutonomousInterval),
+		RecentInterval:     cmp.Or(t.RecentInterval, d.RecentInterval),
+		IdleInterval:       cmp.Or(t.IdleInterval, d.IdleInterval),
+		HumanWindow:        cmp.Or(t.HumanWindow, d.HumanWindow),
+		AutonomousWindow:   cmp.Or(t.AutonomousWindow, d.AutonomousWindow),
+		RecentWindow:       cmp.Or(t.RecentWindow, d.RecentWindow),
+	}
 }
 
 func within(now time.Time, window time.Duration, times ...time.Time) bool {
@@ -71,15 +141,17 @@ type Unit struct {
 	// RepoKey names the repository (its git common dir); captures sharing a RepoKey never overlap.
 	RepoKey  string
 	Sessions []Session
-	// MetaStamp digests the unit's capture-relevant metadata; a unit is never recaptured under an unchanged stamp.
+	// MetaStamp digests the unit's session metadata. A due unit is recaptured
+	// only when MetaStamp or its Stamper code stamp differs from the pair its
+	// last capture recorded.
 	MetaStamp string
 }
 
-// Classify applies Classify to the newest activity across the unit's
+// Classify applies t.Classify to the newest activity across the unit's
 // sessions, so a unit takes the tier of its most urgent session.
-func (u Unit) Classify(now time.Time) (Tier, time.Duration) {
+func (u Unit) Classify(now time.Time, t Tiers) (Tier, time.Duration) {
 	l := u.latest()
-	return Classify(now, l.LastHumanInput, l.LastHumanFocus, l.LastAutonomous, l.LastActivity)
+	return t.Classify(now, l.LastHumanInput, l.LastHumanFocus, l.LastAutonomous, l.LastActivity)
 }
 
 func (u Unit) latest() Session {

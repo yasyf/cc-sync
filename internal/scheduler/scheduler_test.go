@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -135,9 +136,57 @@ func (f *fakePublisher) times() []time.Time {
 	return slices.Clone(f.at)
 }
 
+type fakeStamper struct {
+	mu    sync.Mutex
+	code  map[string]string
+	fail  map[string]error
+	calls map[string][]time.Time
+}
+
+func newStamper() *fakeStamper {
+	return &fakeStamper{code: map[string]string{}, fail: map[string]error{}, calls: map[string][]time.Time{}}
+}
+
+func (f *fakeStamper) CodeStamp(_ context.Context, u Unit) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls[u.WorktreeID] = append(f.calls[u.WorktreeID], time.Now())
+	if err := f.fail[u.WorktreeID]; err != nil {
+		delete(f.fail, u.WorktreeID)
+		return "", err
+	}
+	return cmp.Or(f.code[u.WorktreeID], "c0"), nil
+}
+
+func (f *fakeStamper) set(id, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.code[id] = code
+}
+
+func (f *fakeStamper) failOnce(id string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail[id] = err
+}
+
+func (f *fakeStamper) callsFor(id string) []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls[id])
+}
+
 func start(t *testing.T, cfg Config, inv Inventory, capt Capturer, pub Publisher) (*Scheduler, func()) {
 	t.Helper()
-	s := New(cfg, inv, capt, pub)
+	return startWith(t, cfg, inv, newStamper(), capt, pub)
+}
+
+func startWith(t *testing.T, cfg Config, inv Inventory, stamper Stamper, capt Capturer, pub Publisher) (*Scheduler, func()) {
+	t.Helper()
+	s, err := New(cfg, inv, stamper, capt, pub)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
 	errc := make(chan error, 1)
 	go func() { errc <- s.Run(context.Background()) }()
 	return s, func() {
@@ -175,6 +224,30 @@ func fleet() []Unit {
 		units[i%12].Sessions = append(units[i%12].Sessions, s)
 	}
 	return units
+}
+
+func offsets(t0 time.Time, times []time.Time) []time.Duration {
+	out := make([]time.Duration, len(times))
+	for i, at := range times {
+		out[i] = at.Sub(t0)
+	}
+	return out
+}
+
+func starts(calls []call) []time.Time {
+	out := make([]time.Time, len(calls))
+	for i, c := range calls {
+		out[i] = c.start
+	}
+	return out
+}
+
+func minutes(ms ...int) []time.Duration {
+	out := make([]time.Duration, len(ms))
+	for i, m := range ms {
+		out[i] = time.Duration(m) * time.Minute
+	}
+	return out
 }
 
 func worktrees(calls []call) []string {
@@ -291,18 +364,26 @@ func TestHumanActivityPreemptsQueuedIdle(t *testing.T) {
 
 func TestUnchangedStampNeverRecaptured(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Now()
 		inv := newInventory(fleet()...)
+		stamper := newStamper()
 		capt := newCapturer()
 		pub := &fakePublisher{}
-		s, stop := start(t, Config{}, inv, capt, pub)
+		s, stop := startWith(t, Config{}, inv, stamper, capt, pub)
 		time.Sleep(6 * time.Hour)
+		synctest.Wait()
 		if got := len(capt.snapshot()); got != 12 {
 			t.Fatalf("captures after 6h unchanged = %d, want 12", got)
+		}
+		wantStamps := append(minutes(0, 2, 4, 6, 8, 10, 12, 14, 29, 44, 59), minutes(119, 179, 239, 299, 359)...)
+		if got := offsets(t0, stamper.callsFor("wt00")); !slices.Equal(got, wantStamps) {
+			t.Errorf("wt00 code stamps at %v, want %v: once per due interval as it cools from human to idle", got, wantStamps)
 		}
 		published := len(pub.times())
 
 		inv.update("wt03", func(u *Unit) { u.MetaStamp = "s1" })
 		time.Sleep(2 * time.Hour)
+		synctest.Wait()
 		st := s.Status()
 		stop()
 
@@ -315,6 +396,91 @@ func TestUnchangedStampNeverRecaptured(t *testing.T) {
 		}
 		if st.QueuedByTier != (TierCounts{}) || st.Workers != 0 {
 			t.Errorf("status = %+v, want nothing queued or running", st)
+		}
+	})
+}
+
+func TestCodeOnlyChangeCapturesAtNextInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Now()
+		inv := newInventory(unit("wt", "r", Session{ID: "s", LastHumanFocus: t0}))
+		stamper := newStamper()
+		capt := newCapturer()
+		s, stop := startWith(t, Config{}, inv, stamper, capt, &fakePublisher{})
+		time.Sleep(30 * time.Second)
+		stamper.set("wt", "c1")
+		time.Sleep(7 * time.Minute)
+		synctest.Wait()
+		st := s.Status()
+		stop()
+
+		if got, want := offsets(t0, starts(capt.snapshot())), minutes(0, 2); !slices.Equal(got, want) {
+			t.Errorf("captures at %v, want %v: the code-only edit captured once, at the next 2m interval", got, want)
+		}
+		if got, want := offsets(t0, stamper.callsFor("wt")), minutes(0, 2, 4, 6); !slices.Equal(got, want) {
+			t.Errorf("code stamps at %v, want %v: only when due, never on the 30s scans", got, want)
+		}
+		if got := st.LastRoundAt.Sub(t0); got != 7*time.Minute+30*time.Second {
+			t.Errorf("last scan at %v, want 7m30s", got)
+		}
+		if last := st.Units[0].Last; last.Outcome != OutcomeUnchanged || last.At.Sub(t0) != 6*time.Minute {
+			t.Errorf("last attempt = %+v, want unchanged at 6m", last)
+		}
+	})
+}
+
+func TestConfiguredTiersSetCadence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Now()
+		cfg := Config{Tiers: Tiers{HumanInterval: time.Minute, HumanWindow: 5 * time.Minute, RecentInterval: 7 * time.Minute, RecentWindow: 30 * time.Minute}}
+		inv := newInventory(unit("wt", "r", Session{ID: "s", LastHumanInput: t0}))
+		stamper := newStamper()
+		capt := newCapturer()
+		s, stop := startWith(t, cfg, inv, stamper, capt, &fakePublisher{})
+		time.Sleep(13 * time.Minute)
+		synctest.Wait()
+		st := s.Status()
+		stop()
+
+		if got, want := offsets(t0, stamper.callsFor("wt")), minutes(0, 1, 2, 3, 4, 5, 12); !slices.Equal(got, want) {
+			t.Errorf("code stamps at %v, want %v: every 1m through the 5m human window, then every 7m", got, want)
+		}
+		if n := len(capt.snapshot()); n != 1 {
+			t.Errorf("captures = %d, want 1", n)
+		}
+		if u := st.Units[0]; u.Tier != TierRecent || u.Due.Sub(t0) != 19*time.Minute {
+			t.Errorf("unit status = %+v, want recent and due at 19m", u)
+		}
+	})
+}
+
+func TestNewRejectsInvalidTiers(t *testing.T) {
+	_, err := New(Config{Tiers: Tiers{HumanWindow: 2 * time.Hour}}, newInventory(), newStamper(), newCapturer(), &fakePublisher{})
+	if want := "new scheduler: invalid capture tiers: human_window 2h0m0s exceeds recent_window 1h0m0s"; !errors.Is(err, ErrInvalidTiers) || err.Error() != want {
+		t.Errorf("New() error = %v, want %q", err, want)
+	}
+}
+
+func TestCodeStampFailureRetries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Now()
+		inv := newInventory(unit("wt", "r", Session{ID: "s", LastHumanFocus: t0}))
+		stamper := newStamper()
+		stamper.failOnce("wt", errors.New("git status: exit 128"))
+		capt := newCapturer()
+		pub := &fakePublisher{}
+		s, stop := startWith(t, Config{}, inv, stamper, capt, pub)
+		time.Sleep(time.Minute)
+		st := s.Status()
+		time.Sleep(2 * time.Minute)
+		stop()
+
+		want := Attempt{WorktreeID: "wt", At: t0, Result: Result{Outcome: OutcomeFailed, Reason: "code stamp: git status: exit 128"}}
+		if last := st.Units[0].Last; !sameAttempts([]Attempt{*last}, []Attempt{want}) {
+			t.Errorf("last attempt = %+v, want %+v", last, want)
+		}
+		if got, want := offsets(t0, starts(capt.snapshot())), minutes(2); !slices.Equal(got, want) {
+			t.Errorf("captures at %v, want %v: no capture on a failed stamp, a retry at the tier interval", got, want)
 		}
 	})
 }
@@ -528,7 +694,10 @@ func TestStopDrains(t *testing.T) {
 func TestRunReturnsContextError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		s := New(Config{}, newInventory(unit("wt", "r")), newCapturer(), &fakePublisher{})
+		s, err := New(Config{}, newInventory(unit("wt", "r")), newStamper(), newCapturer(), &fakePublisher{})
+		if err != nil {
+			t.Fatal(err)
+		}
 		errc := make(chan error, 1)
 		go func() { errc <- s.Run(ctx) }()
 		time.Sleep(time.Minute)
