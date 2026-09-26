@@ -1,6 +1,6 @@
 # cc-sync Development Guide
 
-Recover Claude Code sessions, their uncommitted Git work, and Orca workspace layouts on another synckit peer. Distributed via Homebrew: `brew install yasyf/tap/cc-sync`.
+Recover Claude Code sessions, their uncommitted Git work, and Orca workspace layouts on another synckit peer. Install with Go 1.26 or newer: `go install github.com/yasyf/cc-sync/cmd/cc-sync@latest`.
 
 ## Repository Structure
 
