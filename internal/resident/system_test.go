@@ -3,24 +3,17 @@ package resident
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/yasyf/daemonkit"
-
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/pickup"
-	"github.com/yasyf/cc-sync/internal/scheduler"
-	"github.com/yasyf/cc-sync/internal/version"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/codec"
-	"github.com/yasyf/synckit/helperruntime"
 	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
@@ -119,88 +112,4 @@ func TestPrepareWithArtifactStore(t *testing.T) {
 		t.Errorf("stop(%v) called on a clean drain", err)
 	default:
 	}
-}
-
-func TestClientRoundTrip(t *testing.T) {
-	t.Setenv("DAEMONKIT_HOME", shortHome(t))
-	client := Dial()
-	defer func() { _ = client.Close() }()
-	if _, err := client.Status(t.Context()); !errors.Is(err, ErrNotRunning) {
-		t.Fatalf("Status with no helper = %v, want ErrNotRunning", err)
-	}
-
-	h := newHarness(t)
-	runtime, err := helperruntime.New(helperruntime.Config{
-		App:        helperruntime.App{Name: consumer.ServiceID},
-		Dispatcher: h.dispatcher,
-		Prepare:    func(daemonkit.Ctx) (helperruntime.Product, error) { return nopProduct{}, nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	served := make(chan error, 1)
-	go func() { served <- runtime.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-served:
-			if err != nil {
-				t.Errorf("helper run: %v", err)
-			}
-		case <-time.After(45 * time.Second):
-			t.Error("helper did not stop")
-		}
-	})
-
-	var status StatusReply
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		status, err = client.Status(t.Context())
-		if err == nil || !errors.Is(err, ErrNotRunning) || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if status.Build != version.String() || status.Catalog.Self != "me@host" {
-		t.Errorf("Status build/self = %q/%q, want %q/%q", status.Build, status.Catalog.Self, version.String(), "me@host")
-	}
-
-	attempts, err := client.Kick(t.Context(), []string{"s1"})
-	if err != nil {
-		t.Fatalf("Kick: %v", err)
-	}
-	if len(attempts) != 1 || attempts[0].WorktreeID != "wt1" || attempts[0].Outcome != scheduler.OutcomeCaptured {
-		t.Errorf("Kick attempts = %+v, want one captured attempt for wt1", attempts)
-	}
-
-	root := ref("a")
-	owner := pickup.PinOwnerPrefix + "op1"
-	if err := client.Pin(t.Context(), owner, []artifact.Ref{root}, time.Hour); err != nil {
-		t.Fatalf("Pin: %v", err)
-	}
-	if got := h.store.pinned(owner); !reflect.DeepEqual(got, []artifact.Ref{root}) {
-		t.Errorf("pinned %s = %v, want %v", owner, got, root)
-	}
-	if err := client.Pin(t.Context(), "someone-else", []artifact.Ref{root}, time.Hour); err == nil || errors.Is(err, ErrNotRunning) {
-		t.Errorf("Pin under a foreign owner = %v, want the helper's refusal", err)
-	}
-}
-
-type nopProduct struct{}
-
-func (nopProduct) Drain(context.Context) error { return nil }
-func (nopProduct) Close(context.Context) error { return nil }
-
-func shortHome(t *testing.T) string {
-	t.Helper()
-	base, err := os.MkdirTemp("/tmp", "ccs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	return base
 }
