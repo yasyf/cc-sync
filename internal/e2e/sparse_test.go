@@ -81,7 +81,7 @@ func TestPickupSparseSourceUnavailable(t *testing.T) {
 			takeDown(t, a, src)
 
 			full := b.Pickup(hostA + ":" + sess.ID)
-			expansion := fmt.Sprintf("sparse checkout expanded to full: source cone %t, patterns %q", tt.cone, tt.patterns)
+			expansion := fmt.Sprintf("sparse checkout expanded to full: source cone %t, patterns %q, exceptions []", tt.cone, tt.patterns)
 			if full.Checkout.Exact || !slices.Equal(full.Checkout.Differences, []string{expansion}) {
 				t.Fatalf("default pickup checkout %+v, want inexact with the one difference %q", full.Checkout, expansion)
 			}
