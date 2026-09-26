@@ -7,18 +7,15 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -32,8 +29,14 @@ jobs:
       - name: Build
         run: go build ./...
 
+  # synckit and daemonkit compile only on darwin, so the analysis jobs
+  # cross-target darwin from ubuntu instead of billing macOS minutes.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -47,6 +50,10 @@ jobs:
 
   vuln:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -55,5 +62,5 @@ jobs:
           cache: true
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOOS='' GOARCH='' go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
