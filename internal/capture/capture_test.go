@@ -10,6 +10,7 @@ import (
 
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/claudenative"
+	"github.com/yasyf/cc-sync/internal/codesnap"
 	"github.com/yasyf/cc-sync/internal/inventory"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/scheduler"
@@ -136,7 +137,7 @@ func TestCaptureRecordsCheckpoint(t *testing.T) {
 		t.Fatalf("sessions = %v, want %v", gotSessions, want)
 	}
 	deps := h.store.deps(t, cp.Root)
-	wantMedia := []string{"cc-sync.code", MediaOrcaDescriptor, sessionarchive.MediaSession, sessionarchive.MediaSession}
+	wantMedia := []string{codesnap.MediaCode, orcabridge.MediaDescriptor, sessionarchive.MediaSession, sessionarchive.MediaSession}
 	gotMedia := make([]string, len(deps))
 	for i, d := range deps {
 		gotMedia[i] = h.store.media(t, d)
@@ -236,7 +237,7 @@ func TestCaptureOmittedWithoutPriorCode(t *testing.T) {
 		t.Fatalf("result %+v checkpoint deferred %q code %+v, want deferred with no code", res, cp.Deferred, cp.Code)
 	}
 	for _, d := range h.store.deps(t, cp.Root) {
-		if m := h.store.media(t, d); m == "cc-sync.code" {
+		if m := h.store.media(t, d); m == codesnap.MediaCode {
 			t.Fatalf("root depends on code %v with no complete capture", d)
 		}
 	}

@@ -30,9 +30,8 @@ import (
 
 // Media labels of the artifacts a capture stores itself.
 const (
-	MediaCheckpoint     = "cc-sync.checkpoint"
-	MediaOrcaDescriptor = "cc-sync.orca-descriptor"
-	MediaPartial        = "cc-sync.capture-partial"
+	MediaCheckpoint = "cc-sync.checkpoint"
+	MediaPartial    = "cc-sync.capture-partial"
 )
 
 // BusyRetry is how soon a worktree whose code capture hit ErrBusy is due
@@ -52,11 +51,10 @@ const maxNamed = 32
 // ErrUnknownWorktree reports a unit the inventory no longer holds.
 var ErrUnknownWorktree = errors.New("capture: unknown worktree")
 
-// Store is the synckit artifact store surface a capture writes through.
+// Store is the synckit artifact store surface a capture writes through: the
+// code and session writes, plus the per-root closure check and partial pins.
 type Store interface {
-	Put(ctx context.Context, r io.Reader, media string) (artifact.Ref, error)
-	PutGroup(ctx context.Context, media string, deps []artifact.Ref) (artifact.Ref, error)
-	Has(ctx context.Context, digests []artifact.Digest) (missing []artifact.Digest, err error)
+	codesnap.Store
 	Closure(ctx context.Context, roots []artifact.Ref, bound artifact.ClosureBound) (artifact.Closure, error)
 	SetPins(ctx context.Context, owner string, roots []artifact.Ref) error
 }
@@ -398,7 +396,7 @@ func (j *Job) orca(ctx context.Context, wt worktree.Worktree, st *state, now tim
 	if err != nil {
 		return err
 	}
-	ref, err := j.cfg.Store.Put(ctx, bytes.NewReader(descriptor), MediaOrcaDescriptor)
+	ref, err := j.cfg.Store.Put(ctx, bytes.NewReader(descriptor), orcabridge.MediaDescriptor)
 	if err != nil {
 		return fmt.Errorf("store orca descriptor of %s: %w", wt.Root, err)
 	}
