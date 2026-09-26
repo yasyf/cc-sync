@@ -2,12 +2,15 @@ package codesnap
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,7 +105,7 @@ func snapshotOf(t *testing.T, refs map[string]worktree.ArtifactRef) worktree.Sna
 		Schema: worktree.SnapshotSchema,
 		Source: "host-a",
 		Worktree: worktree.Worktree{
-			ID: strings.Repeat("e", 32), Origin: "https://example.com/r.git", Relpath: "r", Trunk: "main",
+			ID: derivedID("https://example.com/r.git", "/src/r", 7), Origin: "https://example.com/r.git", Relpath: "r", Trunk: "main",
 			Root: "/src/r", GitDir: "/src/r/.git", CommonDir: "/src/r/.git", Kind: worktree.KindGit,
 			Branch: "feat", Head: oid('1'), Incarnation: 7,
 		},
@@ -432,4 +435,9 @@ func TestSourceFromManifestRefusesNonCodeRoot(t *testing.T) {
 	if _, err := SourceFromManifest(t.Context(), f.store, plain); err == nil {
 		t.Fatal("SourceFromManifest accepted a plain blob manifest")
 	}
+}
+
+func derivedID(origin, root string, incarnation uint64) string {
+	sum := sha256.Sum256([]byte(origin + "\x00" + root + "\x00" + strconv.FormatUint(incarnation, 10)))
+	return hex.EncodeToString(sum[:])[:32]
 }

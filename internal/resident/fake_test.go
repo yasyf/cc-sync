@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -191,7 +192,7 @@ func newHarness(t *testing.T) *harness {
 				Sessions:   []scheduler.Session{{ID: "s1", LastActivity: time.Now()}},
 				MetaStamp:  "m1",
 			}}
-			return Pipeline{Inventory: &fakeInventory{units: units}, Capturer: fakeCapturer{}, Verifier: fakeVerifier{}}, nil
+			return Pipeline{Inventory: &fakeInventory{units: units}, Stamper: &fakeStamper{}, Capturer: fakeCapturer{}, Verifier: fakeVerifier{}}, nil
 		},
 	}
 	r, err := Prepare(t.Context(), h.dispatcher, deps, func(err error) { h.stops <- err })
@@ -227,4 +228,10 @@ func exists(t *testing.T, path string) bool {
 	t.Helper()
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+type fakeStamper struct{ n atomic.Int64 }
+
+func (f *fakeStamper) CodeStamp(context.Context, scheduler.Unit) (string, error) {
+	return strconv.FormatInt(f.n.Add(1), 10), nil
 }

@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
+
+	"github.com/yasyf/cc-sync/internal/scheduler"
 )
 
 const (
@@ -58,14 +61,32 @@ type Config struct {
 }
 
 // DefaultTiers are the approved capture cadences.
-var DefaultTiers = Tiers{
-	HumanInterval:      codec.Duration(2 * time.Minute),
-	AutonomousInterval: codec.Duration(5 * time.Minute),
-	RecentInterval:     codec.Duration(15 * time.Minute),
-	IdleInterval:       codec.Duration(time.Hour),
-	HumanWindow:        codec.Duration(15 * time.Minute),
-	AutonomousWindow:   codec.Duration(15 * time.Minute),
-	RecentWindow:       codec.Duration(time.Hour),
+var DefaultTiers = TiersOf(scheduler.DefaultTiers())
+
+// TiersOf renders scheduler tiers as their config.json form.
+func TiersOf(t scheduler.Tiers) Tiers {
+	return Tiers{
+		HumanInterval:      codec.Duration(t.HumanInterval),
+		AutonomousInterval: codec.Duration(t.AutonomousInterval),
+		RecentInterval:     codec.Duration(t.RecentInterval),
+		IdleInterval:       codec.Duration(t.IdleInterval),
+		HumanWindow:        codec.Duration(t.HumanWindow),
+		AutonomousWindow:   codec.Duration(t.AutonomousWindow),
+		RecentWindow:       codec.Duration(t.RecentWindow),
+	}
+}
+
+// Scheduler converts the tiers to the scheduler's form.
+func (t Tiers) Scheduler() scheduler.Tiers {
+	return scheduler.Tiers{
+		HumanInterval:      time.Duration(t.HumanInterval),
+		AutonomousInterval: time.Duration(t.AutonomousInterval),
+		RecentInterval:     time.Duration(t.RecentInterval),
+		IdleInterval:       time.Duration(t.IdleInterval),
+		HumanWindow:        time.Duration(t.HumanWindow),
+		AutonomousWindow:   time.Duration(t.AutonomousWindow),
+		RecentWindow:       time.Duration(t.RecentWindow),
+	}
 }
 
 // Resolve returns the layout under the config directory: DirEnv when set,
@@ -120,9 +141,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
+	if err := decode(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("%w: %s: %w", ErrInvalid, path, err)
 	}
 	if err := cfg.Capture.Validate(); err != nil {
@@ -131,23 +150,24 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate refuses a non-positive duration.
+// Validate reports ErrInvalid wrapping scheduler.ErrInvalidTiers unless every
+// duration is positive and the human and autonomous windows fit within the
+// recent window.
 func (t Tiers) Validate() error {
-	for _, field := range []struct {
-		name string
-		d    codec.Duration
-	}{
-		{"human_interval", t.HumanInterval},
-		{"autonomous_interval", t.AutonomousInterval},
-		{"recent_interval", t.RecentInterval},
-		{"idle_interval", t.IdleInterval},
-		{"human_window", t.HumanWindow},
-		{"autonomous_window", t.AutonomousWindow},
-		{"recent_window", t.RecentWindow},
-	} {
-		if field.d <= 0 {
-			return fmt.Errorf("%w: capture.%s must be positive, got %s", ErrInvalid, field.name, time.Duration(field.d))
-		}
+	if err := t.Scheduler().Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return nil
+}
+
+func decode(data []byte, cfg *Config) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(cfg); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing data after the config object")
 	}
 	return nil
 }

@@ -381,7 +381,7 @@ func TestCaptureUnknownWorktree(t *testing.T) {
 
 func TestCodeStamp(t *testing.T) {
 	h := newHarness(t)
-	got, err := h.job.CodeStamp(context.Background(), wtID)
+	got, err := h.job.CodeStamp(context.Background(), scheduler.Unit{WorktreeID: wtID})
 	if err != nil || got != "code-1" {
 		t.Fatalf("CodeStamp = %q, %v; want code-1", got, err)
 	}

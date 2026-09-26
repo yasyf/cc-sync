@@ -38,7 +38,7 @@ const (
 // again. PartialPinTTL bounds how long the content a partial code capture
 // already stored stays pinned without a complete snapshot.
 const (
-	BusyRetry     = 30 * time.Second
+	BusyRetry     = scheduler.BusyRetry
 	PartialPinTTL = 24 * time.Hour
 )
 
@@ -99,7 +99,8 @@ type Targets interface {
 }
 
 // Config wires a Job. Self is this host's synckit id; a zero Bound takes
-// artifact.DefaultClosureBound and a zero Limits takes reposync's defaults.
+// artifact.DefaultClosureBound, a zero Limits takes reposync's defaults, and
+// a zero Tiers takes scheduler.DefaultTiers for labeling session activity.
 type Config struct {
 	Self      string
 	Layout    claudenative.Layout
@@ -115,6 +116,7 @@ type Config struct {
 	StateDir  string
 	Limits    worktree.Limits
 	Bound     artifact.ClosureBound
+	Tiers     scheduler.Tiers
 	Now       func() time.Time
 }
 
@@ -131,6 +133,9 @@ func New(cfg Config) *Job {
 	if cfg.Bound == (artifact.ClosureBound{}) {
 		cfg.Bound = artifact.DefaultClosureBound
 	}
+	if cfg.Tiers == (scheduler.Tiers{}) {
+		cfg.Tiers = scheduler.DefaultTiers()
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -138,11 +143,11 @@ func New(cfg Config) *Job {
 }
 
 // CodeStamp digests the unit's worktree's work in progress for the scheduler
-// to compare at due time.
-func (j *Job) CodeStamp(ctx context.Context, worktreeID string) (string, error) {
-	t, ok := j.cfg.Targets.Target(worktreeID)
+// to compare at due time; it makes Job the scheduler's Stamper.
+func (j *Job) CodeStamp(ctx context.Context, u scheduler.Unit) (string, error) {
+	t, ok := j.cfg.Targets.Target(u.WorktreeID)
 	if !ok {
-		return "", fmt.Errorf("%w: %s", ErrUnknownWorktree, worktreeID)
+		return "", fmt.Errorf("%w: %s", ErrUnknownWorktree, u.WorktreeID)
 	}
 	stamp, err := j.cfg.Stamper.Stamp(ctx, t.Worktree)
 	if err != nil {
@@ -464,7 +469,7 @@ func (j *Job) checkpoint(t inventory.Target, st state, code codeResult, root art
 	complete := code.complete()
 	for _, s := range t.Sessions {
 		cp.SourceActivityAt = later(cp.SourceActivityAt, s.LastActivity)
-		tier, _ := scheduler.Classify(now, s.LastHumanInput, time.Time{}, s.LastAutonomousActivity, s.LastActivity)
+		tier, _ := j.cfg.Tiers.Classify(now, s.LastHumanInput, time.Time{}, s.LastAutonomousActivity, s.LastActivity)
 		cp.Sessions = append(cp.Sessions, catalog.Session{
 			ID:                string(s.ID),
 			Title:             s.Title,

@@ -52,6 +52,7 @@ type Capture[S Store] struct {
 // Pipeline is the capture and verification surface the resident schedules.
 type Pipeline struct {
 	Inventory scheduler.Inventory
+	Stamper   scheduler.Stamper
 	Capturer  scheduler.Capturer
 	Verifier  consumer.CodeVerifier
 }
@@ -181,7 +182,10 @@ func Prepare[S Store](ctx context.Context, d *rpc.Dispatcher, deps Deps[S], stop
 		return nil, fmt.Errorf("resident: capture pipeline: %w", err)
 	}
 
-	sched := scheduler.New(scheduler.Config{}, pipeline.Inventory, pipeline.Capturer, publisher)
+	sched, err := scheduler.New(scheduler.Config{Tiers: cfg.Capture.Scheduler()}, pipeline.Inventory, pipeline.Stamper, pipeline.Capturer, publisher)
+	if err != nil {
+		return nil, fmt.Errorf("resident: %w", err)
+	}
 	svc := &service{
 		Consumer: consumer.New(consumer.Config{
 			Catalog:      cat,

@@ -1,7 +1,8 @@
 // Package scheduler decides when each worktree is captured. Activity tiers set
 // each unit's cadence, a bounded worker pool runs at most one capture per
-// repository, unchanged metadata is never recaptured, and catalog stamp bumps
-// are coalesced. It takes no network input, so local capture never pauses.
+// repository, a unit whose session metadata and worktree code are both
+// unchanged is never recaptured, and catalog stamp bumps are coalesced. It
+// takes no network input, so local capture never pauses.
 package scheduler
 
 import (
@@ -23,12 +24,16 @@ var (
 	ErrStopped = errors.New("scheduler stopped")
 )
 
+// BusyRetry is how soon a unit whose capture reported OutcomeBusy is due
+// again, unless its tier interval is sooner.
+const BusyRetry = 30 * time.Second
+
 // Outcome names what became of one due unit. A Capturer reports
-// OutcomeCaptured, OutcomeDeferred, OutcomeBusy, OutcomePartial or
-// OutcomeMissingLFS; the scheduler itself reports the rest. Every outcome
-// but OutcomeCaptured leaves the prior checkpoint current and the unit due
-// again: OutcomePartial (resumable budget progress, never Ready) at once, the
-// others at the unit's tier interval.
+// OutcomeCaptured, OutcomeUnchanged, OutcomeDeferred, OutcomeBusy,
+// OutcomePartial or OutcomeMissingLFS; the scheduler itself reports the rest.
+// Every outcome but OutcomeCaptured leaves the prior checkpoint current and
+// the unit due again: OutcomePartial (resumable budget progress, never Ready)
+// at once, OutcomeBusy after BusyRetry, the others at the unit's tier interval.
 type Outcome string
 
 // The outcomes.
@@ -63,6 +68,13 @@ type Inventory interface {
 	Scan(ctx context.Context) ([]Unit, error)
 }
 
+// Stamper digests a unit's worktree code: HEAD, the index, and every dirty or
+// untracked path. The scheduler calls it only for a unit that has come due,
+// never on the metadata scan.
+type Stamper interface {
+	CodeStamp(ctx context.Context, u Unit) (string, error)
+}
+
 // Capturer captures one unit. It honors ctx cancellation at its safe points;
 // an error means the attempt failed outright.
 type Capturer interface {
@@ -76,11 +88,13 @@ type Publisher interface {
 }
 
 // Config tunes a Scheduler. Zero fields take the defaults: 2 capture workers,
-// a 30s metadata scan, and a 10s stamp coalescing window.
+// a 30s metadata scan, a 10s stamp coalescing window, and DefaultTiers for
+// each zero Tiers field.
 type Config struct {
 	Workers       int
 	ScanInterval  time.Duration
 	StampCoalesce time.Duration
+	Tiers         Tiers
 }
 
 // TierCounts counts units per tier.
@@ -103,7 +117,8 @@ type UnitStatus struct {
 
 // Status is a point-in-time snapshot of the scheduler. QueuedByTier counts
 // due units waiting for a worker or their repository; Workers counts
-// captures in flight; LastRoundAt is the last metadata scan.
+// attempts in flight, each a code stamp and any capture it leads to;
+// LastRoundAt is the last metadata scan.
 type Status struct {
 	QueuedByTier TierCounts   `json:"queued_by_tier"`
 	Workers      int          `json:"workers"`
@@ -113,10 +128,11 @@ type Status struct {
 
 // Scheduler runs captures on the cadence each unit's activity earns.
 type Scheduler struct {
-	cfg  Config
-	inv  Inventory
-	capt Capturer
-	pub  Publisher
+	cfg     Config
+	inv     Inventory
+	stamper Stamper
+	capt    Capturer
+	pub     Publisher
 
 	kicks   chan kickRequest
 	results chan finished
@@ -139,8 +155,9 @@ type entry struct {
 	interval time.Duration
 	humanAt  time.Time
 	checked  time.Time
-	captured string
+	captured stamps
 	urgent   bool
+	busy     bool
 	running  bool
 	removed  bool
 	kickers  []*kick
@@ -148,8 +165,13 @@ type entry struct {
 	last     *Attempt
 }
 
+type stamps struct {
+	meta, code string
+}
+
 type finished struct {
 	unit   Unit
+	stamps stamps
 	result Result
 	err    error
 }
@@ -170,14 +192,20 @@ type kick struct {
 	reply    chan kickReply
 }
 
-// New builds a Scheduler; Run drives it.
-func New(cfg Config, inv Inventory, capt Capturer, pub Publisher) *Scheduler {
+// New builds a Scheduler; Run drives it. It reports ErrInvalidTiers when
+// cfg.Tiers, defaults applied, fails Tiers.Validate.
+func New(cfg Config, inv Inventory, stamper Stamper, capt Capturer, pub Publisher) (*Scheduler, error) {
 	cfg.Workers = cmp.Or(cfg.Workers, 2)
 	cfg.ScanInterval = cmp.Or(cfg.ScanInterval, 30*time.Second)
 	cfg.StampCoalesce = cmp.Or(cfg.StampCoalesce, 10*time.Second)
+	cfg.Tiers = cfg.Tiers.orDefaults()
+	if err := cfg.Tiers.Validate(); err != nil {
+		return nil, fmt.Errorf("new scheduler: %w", err)
+	}
 	return &Scheduler{
 		cfg:     cfg,
 		inv:     inv,
+		stamper: stamper,
 		capt:    capt,
 		pub:     pub,
 		kicks:   make(chan kickRequest),
@@ -185,7 +213,7 @@ func New(cfg Config, inv Inventory, capt Capturer, pub Publisher) *Scheduler {
 		stop:    make(chan struct{}),
 		exited:  make(chan struct{}),
 		units:   map[string]*entry{},
-	}
+	}, nil
 }
 
 // Run scans and captures until ctx is canceled or Stop is called. It then
@@ -227,7 +255,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 // Kick scans at once, makes the units holding sessionIDs (every unit when
 // none are named) due now, and waits for each unit's attempt. A unit whose
-// metadata is unchanged reports OutcomeUnchanged without capturing.
+// metadata and code stamps are unchanged reports OutcomeUnchanged without
+// capturing.
 func (s *Scheduler) Kick(ctx context.Context, sessionIDs ...string) ([]Attempt, error) {
 	req := kickRequest{sessionIDs: sessionIDs, reply: make(chan kickReply, 1)}
 	select {
@@ -306,7 +335,7 @@ func (s *Scheduler) scan(ctx context.Context) error {
 			s.units[u.WorktreeID] = e
 		}
 		e.unit, e.removed = u, false
-		e.tier, e.interval = u.Classify(now)
+		e.tier, e.interval = u.Classify(now, s.cfg.Tiers)
 		e.humanAt = u.humanAt()
 	}
 	for id, e := range s.units {
@@ -335,12 +364,6 @@ func (s *Scheduler) dispatch(ctx context.Context, workers *sync.WaitGroup) {
 		if e.running || e.due().After(now) {
 			continue
 		}
-		if e.unit.MetaStamp == e.captured {
-			e.checked, e.urgent = now, false
-			e.settle(Attempt{WorktreeID: e.unit.WorktreeID, At: now, Result: Result{Outcome: OutcomeUnchanged}}, e.kickers)
-			e.kickers = nil
-			continue
-		}
 		if s.running == s.cfg.Workers || busy[e.unit.RepoKey] {
 			continue
 		}
@@ -348,12 +371,25 @@ func (s *Scheduler) dispatch(ctx context.Context, workers *sync.WaitGroup) {
 		s.running++
 		e.running, e.checked, e.urgent = true, now, false
 		e.inflight, e.kickers = e.kickers, nil
-		u := e.unit
+		u, last := e.unit, e.captured
 		workers.Go(func() {
-			res, err := s.capt.Capture(ctx, u)
-			s.results <- finished{unit: u, result: res, err: err}
+			st, res, err := s.attempt(ctx, u, last)
+			s.results <- finished{unit: u, stamps: st, result: res, err: err}
 		})
 	}
+}
+
+func (s *Scheduler) attempt(ctx context.Context, u Unit, last stamps) (stamps, Result, error) {
+	code, err := s.stamper.CodeStamp(ctx, u)
+	if err != nil {
+		return stamps{}, Result{}, fmt.Errorf("code stamp: %w", err)
+	}
+	st := stamps{meta: u.MetaStamp, code: code}
+	if st == last {
+		return st, Result{Outcome: OutcomeUnchanged}, nil
+	}
+	res, err := s.capt.Capture(ctx, u)
+	return st, res, err
 }
 
 func (s *Scheduler) finish(f finished) {
@@ -363,14 +399,16 @@ func (s *Scheduler) finish(f finished) {
 	s.running--
 	e := s.units[f.unit.WorktreeID]
 	e.running = false
+	e.busy = f.err == nil && f.result.Outcome == OutcomeBusy
 	a := Attempt{WorktreeID: f.unit.WorktreeID, At: now, Result: f.result}
 	switch {
 	case f.err != nil:
 		a.Result = Result{Outcome: OutcomeFailed, Reason: f.err.Error()}
 		slog.Warn("capture failed", "worktree", f.unit.WorktreeID, "repo", f.unit.RepoKey, "err", f.err)
 	case f.result.Outcome == OutcomeCaptured:
-		e.captured = f.unit.MetaStamp
+		e.captured = f.stamps
 		s.dirty = true
+	case f.result.Outcome == OutcomeUnchanged:
 	case f.result.Outcome == OutcomePartial:
 		e.urgent = true
 		s.dirty = true
@@ -502,11 +540,14 @@ func (e *entry) due() time.Time {
 	if e.urgent {
 		return time.Time{}
 	}
+	if e.busy {
+		return e.checked.Add(min(BusyRetry, e.interval))
+	}
 	return e.checked.Add(e.interval)
 }
 
 func (e *entry) queued(now time.Time) bool {
-	return !e.running && !e.due().After(now) && e.unit.MetaStamp != e.captured
+	return !e.running && !e.due().After(now)
 }
 
 func (e *entry) settle(a Attempt, kicks []*kick) {
