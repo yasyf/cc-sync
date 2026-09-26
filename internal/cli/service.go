@@ -44,12 +44,16 @@ type SyncRequest struct {
 	Sessions []string
 }
 
-// PickupRequest configures `cc-sync pickup`. Resume lists the session ids to
-// resume, empty meaning the default choice; OnDivergence resolves a divergent
-// local copy of a picked session; Progress receives every phase.
+// PickupRequest configures `cc-sync pickup`. AllowPartial admits an
+// explicitly selected partial checkpoint; ApplySparse keeps a sparse source's
+// recovery checkout sparse. Resume lists the session ids to resume, empty
+// meaning the default choice; OnDivergence resolves a divergent local copy of
+// a picked session; Progress receives every phase.
 type PickupRequest struct {
 	Target       Target
 	Checkpoint   CheckpointSelector
+	AllowPartial bool
+	ApplySparse  bool
 	Resume       []string
 	OnDivergence Divergence
 	NoOrca       bool

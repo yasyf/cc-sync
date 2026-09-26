@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -38,18 +41,57 @@ type SessionMapping struct {
 // MediaDescriptor is the artifact media of a stored Orca recovery descriptor.
 const MediaDescriptor = "cc-sync.orca-descriptor"
 
-// ImportRequest is one `orca recovery import`; Descriptor is passed on stdin verbatim.
+// MaxAppendSystemPromptBytes caps one RecoveryLaunch.AppendSystemPrompt.
+const MaxAppendSystemPromptBytes = 16 << 10
+
+// AgentClaude is the RecoveryBindingKey agent of a Claude Code session.
+const AgentClaude = "claude"
+
+// RecoveryBindingKey identifies one agent binding: agent, key kind
+// ("session_id" or "conversation_id"), provider id, and, for agents keyed by
+// transcript, the transcript path.
+type RecoveryBindingKey struct {
+	Agent          string `json:"agent"`
+	Key            string `json:"key"`
+	ID             string `json:"id"`
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+}
+
+// BindingSelector is the bare-id form of Orca's RecoveryBindingSelector: it
+// matches the one binding whose provider session id it is, and Orca refuses
+// it with CodeBindingAmbiguous when several bindings share that id.
+type BindingSelector string
+
+// OmittedBinding is a descriptor binding Orca left out of the export, with why.
+type OmittedBinding struct {
+	Agent  string `json:"agent"`
+	Key    string `json:"key"`
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// RecoveryLaunch extends the resume launch of one imported session;
+// AppendSystemPrompt becomes claude's --append-system-prompt.
+type RecoveryLaunch struct {
+	AppendSystemPrompt string `json:"appendSystemPrompt"`
+}
+
+// ImportRequest is one `orca recovery import`; Descriptor is passed on stdin
+// verbatim. Resume selects by local session id, SessionIDMap renames forked
+// sessions, and RecoveryLaunch, keyed by source session id, reaches Orca only
+// when its runtime advertises CapabilityRecoveryLaunch.
 type ImportRequest struct {
-	Descriptor   []byte
-	Checkout     string
-	CheckpointID string
-	PathMap      []PathMapping
-	Resume       []string
-	SessionIDMap []SessionMapping
-	PreferClient string
-	Activate     bool
-	RegisterRepo bool
-	DryRun       bool
+	Descriptor     []byte
+	Checkout       string
+	CheckpointID   string
+	PathMap        []PathMapping
+	Resume         []BindingSelector
+	SessionIDMap   []SessionMapping
+	RecoveryLaunch map[string]RecoveryLaunch
+	PreferClient   string
+	Activate       bool
+	RegisterRepo   bool
+	DryRun         bool
 }
 
 // ImportResult is the `orca recovery import --json` result.
@@ -81,12 +123,12 @@ type IDMap struct {
 
 // ImportedBinding reports one agent binding's outcome: "dormant", "resumed", or "refused".
 type ImportedBinding struct {
-	SourcePaneKey     string `json:"sourcePaneKey"`
-	LocalPaneKey      string `json:"localPaneKey"`
-	ProviderSessionID string `json:"providerSessionId"`
-	Status            string `json:"status"`
-	Reason            string `json:"reason"`
-	TerminalHandle    string `json:"terminalHandle"`
+	SourcePaneKey  string             `json:"sourcePaneKey"`
+	LocalPaneKey   string             `json:"localPaneKey"`
+	Binding        RecoveryBindingKey `json:"binding"`
+	Status         string             `json:"status"`
+	Reason         string             `json:"reason"`
+	TerminalHandle string             `json:"terminalHandle"`
 }
 
 // ResumeResult is the `orca recovery resume --json` result; Disposition is "created" or "adopted".
@@ -102,6 +144,20 @@ type DormantBinding struct {
 	WorktreeID      string          `json:"worktreeId"`
 	ProviderSession ProviderSession `json:"providerSession"`
 	Provenance      json.RawMessage `json:"provenance"`
+}
+
+// Omitted returns the bindings descriptor lists as left out of its export.
+func Omitted(descriptor []byte) ([]OmittedBinding, error) {
+	var d struct {
+		OmittedBindings *[]OmittedBinding `json:"omittedBindings"`
+	}
+	if err := json.Unmarshal(descriptor, &d); err != nil {
+		return nil, fmt.Errorf("decode orca descriptor: %w", err)
+	}
+	if d.OmittedBindings == nil {
+		return nil, &RefusedError{Code: CodeDescriptorInvalid, Message: "descriptor lacks omittedBindings"}
+	}
+	return *d.OmittedBindings, nil
 }
 
 // ProviderSession identifies an agent's own session.
@@ -150,8 +206,17 @@ func (c *Client) Import(ctx context.Context, req ImportRequest) (ImportResult, e
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if _, err := c.Verify(ctx); err != nil {
+	rt, err := c.Verify(ctx)
+	if err != nil {
 		return ImportResult{}, err
+	}
+	if len(req.RecoveryLaunch) > 0 && slices.Contains(rt.Description.Capabilities, CapabilityRecoveryLaunch) {
+		path, err := writeRecoveryLaunch(req.RecoveryLaunch)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		defer func() { _ = os.Remove(path) }()
+		args = slices.Insert(args, len(args)-1, "--recovery-launch-file", path)
 	}
 	var result ImportResult
 	if err := c.run(ctx, req.Descriptor, &result, args...); err != nil {
@@ -160,7 +225,33 @@ func (c *Client) Import(ctx context.Context, req ImportRequest) (ImportResult, e
 	return result, nil
 }
 
+func writeRecoveryLaunch(launch map[string]RecoveryLaunch) (path string, err error) {
+	data, err := json.Marshal(launch)
+	if err != nil {
+		return "", fmt.Errorf("encode recovery launch: %w", err)
+	}
+	f, err := os.CreateTemp("", "cc-sync-recovery-launch-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create recovery launch file: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, f.Close())
+		if err != nil {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return "", fmt.Errorf("write recovery launch file: %w", err)
+	}
+	return f.Name(), nil
+}
+
 func importArgs(req ImportRequest) ([]string, error) {
+	for sid, l := range req.RecoveryLaunch {
+		if len(l.AppendSystemPrompt) > MaxAppendSystemPromptBytes {
+			return nil, fmt.Errorf("orca recovery import: session %s append-system-prompt is %d bytes, cap %d", sid, len(l.AppendSystemPrompt), MaxAppendSystemPromptBytes)
+		}
+	}
 	args := []string{"recovery", "import", "--descriptor", "-", "--checkout", req.Checkout, "--checkpoint", req.CheckpointID}
 	for _, m := range req.PathMap {
 		if strings.Contains(m.From, "=") {
@@ -168,8 +259,8 @@ func importArgs(req ImportRequest) ([]string, error) {
 		}
 		args = append(args, "--path-map", m.From+"="+m.To)
 	}
-	for _, id := range req.Resume {
-		args = append(args, "--resume", id)
+	for _, sel := range req.Resume {
+		args = append(args, "--resume", string(sel))
 	}
 	for _, m := range req.SessionIDMap {
 		args = append(args, "--session-map", m.From+"="+m.To)
@@ -189,12 +280,13 @@ func importArgs(req ImportRequest) ([]string, error) {
 	return append(args, "--json"), nil
 }
 
-// Resume launches one dormant recovered session in worktree; focus brings its pane forward.
-func (c *Client) Resume(ctx context.Context, worktree Selector, providerSessionID string, focus bool) (ResumeResult, error) {
+// Resume launches the dormant recovered session binding selects in
+// worktree; focus brings its pane forward.
+func (c *Client) Resume(ctx context.Context, worktree Selector, binding BindingSelector, focus bool) (ResumeResult, error) {
 	if _, err := c.Verify(ctx); err != nil {
 		return ResumeResult{}, err
 	}
-	args := []string{"recovery", "resume", "--worktree", string(worktree), "--session", providerSessionID}
+	args := []string{"recovery", "resume", "--worktree", string(worktree), "--session", string(binding)}
 	if focus {
 		args = append(args, "--focus")
 	}

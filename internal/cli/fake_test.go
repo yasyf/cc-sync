@@ -285,9 +285,24 @@ func fullInspect() cli.InspectResult {
 	}
 }
 
+var pickedCheckpoint = cli.PickupCheckpoint{ID: "c0ffee12", CapturedAt: cli.Time{Time: time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)}}
+
+func partialSparsePickup() cli.PickupResult {
+	return cli.PickupResult{
+		Checkpoint: cli.PickupCheckpoint{ID: "d00d1e55", CapturedAt: cli.Time{Time: time.Date(2026, 9, 26, 13, 0, 0, 0, time.UTC)}, Partial: true, CodeDeferred: "missing-lfs"},
+		Checkout: cli.PickupCheckout{
+			Path: recoveredCheckout, Branch: ptr("feature/sync"),
+			Differences: []string{"sparse checkout expanded to full: /web/"},
+			Sparse:      &cli.SparseCheckout{Cone: true, Patterns: []string{"/web/"}, Expanded: true},
+		},
+		Sessions: []cli.PickedSession{{SessionID: humanSession, Status: cli.SessionRestored, Selected: true, Launch: claudeLaunch(recoveredCheckout, humanSession)}},
+	}
+}
+
 func orcaPickup() cli.PickupResult {
 	return cli.PickupResult{
-		Checkout: cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
+		Checkpoint: pickedCheckpoint,
+		Checkout:   cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
 		Sessions: []cli.PickedSession{
 			{SessionID: humanSession, Status: cli.SessionResumed, Selected: true},
 			{SessionID: backgroundSession, Status: cli.SessionDormant, Launch: claudeLaunch(recoveredCheckout, backgroundSession)},
@@ -302,7 +317,8 @@ func orcaPickup() cli.PickupResult {
 
 func orcaDormantPickup() cli.PickupResult {
 	return cli.PickupResult{
-		Checkout: cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
+		Checkpoint: pickedCheckpoint,
+		Checkout:   cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
 		Sessions: []cli.PickedSession{
 			{SessionID: humanSession, Status: cli.SessionDormant, Selected: true, Launch: claudeLaunch(recoveredCheckout, humanSession)},
 			{SessionID: backgroundSession, Status: cli.SessionDormant, Launch: claudeLaunch(recoveredCheckout, backgroundSession)},
@@ -313,7 +329,8 @@ func orcaDormantPickup() cli.PickupResult {
 
 func cliOnlyPickup() cli.PickupResult {
 	return cli.PickupResult{
-		Checkout: cli.PickupCheckout{Path: "/Users/yasyf/Code/monorepo-recovered", Reused: true},
+		Checkpoint: pickedCheckpoint,
+		Checkout:   cli.PickupCheckout{Path: "/Users/yasyf/Code/monorepo-recovered", Reused: true},
 		Sessions: []cli.PickedSession{{
 			SessionID: humanSession,
 			Status:    cli.SessionRestored,
@@ -325,7 +342,8 @@ func cliOnlyPickup() cli.PickupResult {
 
 func forkRefusedPickup() cli.PickupResult {
 	return cli.PickupResult{
-		Checkout: cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
+		Checkpoint: pickedCheckpoint,
+		Checkout:   cli.PickupCheckout{Path: recoveredCheckout, Branch: ptr("feature/sync")},
 		Sessions: []cli.PickedSession{
 			{SessionID: forkedSession, Status: cli.SessionRestored, Selected: true, Launch: claudeLaunch(recoveredCheckout, forkedSession), ForkedFrom: ptr(humanSession)},
 			{SessionID: backgroundSession, Status: cli.SessionRefused, Reason: cli.CodeDivergentLocalCopy},

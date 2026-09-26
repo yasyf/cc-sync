@@ -11,6 +11,9 @@ const (
 	CapabilityWorkspace = "cross-machine-recovery.workspace.v1"
 	// CapabilityPresentation marks hosts whose exports carry client views.
 	CapabilityPresentation = "cross-machine-recovery.presentation.v1"
+	// CapabilityRecoveryLaunch marks runtimes whose import accepts
+	// --recovery-launch-file.
+	CapabilityRecoveryLaunch = "cross-machine-recovery.recovery-launch.v1"
 
 	localTarget          = "local"
 	localExecutionHostID = "local"

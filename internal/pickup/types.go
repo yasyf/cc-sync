@@ -7,10 +7,11 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-sync/internal/catalog"
-	"github.com/yasyf/cc-sync/internal/claudenative"
 	"github.com/yasyf/cc-sync/internal/codesnap"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/replica"
+	"github.com/yasyf/cc-sync/internal/sessionrestore"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 )
 
@@ -39,15 +40,19 @@ type CodeRestorer interface {
 	Remove(ctx context.Context, r Restored) error
 }
 
-// RestoreOptions mirrors reposync's worktree.RestoreOptions.
+// RestoreOptions mirrors reposync's worktree.RestoreOptions. ApplySparse
+// re-applies the source's sparse-checkout patterns in a new recovery worktree
+// instead of expanding it to a full checkout.
 type RestoreOptions struct {
-	Dest     string
-	Branch   string
-	Fresh    bool
-	FetchLFS bool
+	Dest        string
+	Branch      string
+	Fresh       bool
+	FetchLFS    bool
+	ApplySparse bool
 }
 
-// Restored mirrors reposync's worktree.Restored.
+// Restored mirrors reposync's worktree.Restored. Sparse holds the source's
+// sparse-checkout patterns, set whenever the source worktree was sparse.
 type Restored struct {
 	Path        string
 	Branch      string
@@ -58,6 +63,7 @@ type Restored struct {
 	LFSPending  []string
 	Exact       bool
 	Differences []string
+	Sparse      *worktree.Sparse
 }
 
 // SessionRestorer plans the native install of one session replica without
@@ -66,7 +72,9 @@ type SessionRestorer interface {
 	Prepare(ctx context.Context, replica string, t SessionTarget, d Divergence) (PreparedSession, error)
 }
 
-// PreparedSession is one planned session install.
+// PreparedSession is one planned session install; its Plan names the local
+// id (new only for a fork), the source id, the install mode, the recovery
+// context, and the launch.
 type PreparedSession interface {
 	Plan() SessionPlan
 	Apply(ctx context.Context) error
@@ -77,94 +85,52 @@ type Orca interface {
 	Import(ctx context.Context, req orcabridge.ImportRequest) (orcabridge.ImportResult, error)
 }
 
-// PathRule mirrors sessionrestore.PathRule.
-type PathRule struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-}
+// PathRule maps one source path prefix to its destination.
+type PathRule = sessionrestore.PathRule
 
-// PathMap mirrors sessionrestore.PathMap.
-type PathMap []PathRule
+// PathMap relocates source-layout paths.
+type PathMap = sessionrestore.PathMap
 
-// SessionTarget mirrors sessionrestore.Target: the destination layout and
-// home, the recovered cwd, and the checkout roots the code restore mapped.
-type SessionTarget struct {
-	Layout    claudenative.Layout
-	Home      string
-	Cwd       string
-	Checkouts PathMap
-}
+// SessionTarget is where a session lands: layout, home, cwd, and checkout roots.
+type SessionTarget = sessionrestore.Target
 
-// Divergence mirrors sessionrestore.Divergence, the --on-divergence choice.
-type Divergence string
+// Divergence is the --on-divergence choice.
+type Divergence = sessionrestore.Divergence
+
+// SessionMode is how the picked history lands.
+type SessionMode = sessionrestore.Mode
+
+// Launch is how to resume an installed session natively.
+type Launch = sessionrestore.Launch
+
+// SessionPlan is a prepared session install as sessionrestore planned it.
+type SessionPlan = sessionrestore.Plan
+
+// DivergentLocalError reports a local copy holding records the picked checkpoint lacks.
+type DivergentLocalError = sessionrestore.DivergentLocalError
+
+// IncompatibleError names a capability or format the destination claude lacks.
+type IncompatibleError = sessionrestore.IncompatibleError
 
 // Divergence choices; the zero value refuses.
 const (
-	DivergenceRefuse    Divergence = "refuse"
-	DivergenceKeepLocal Divergence = "keep-local"
-	DivergenceReplace   Divergence = "replace"
-	DivergenceFork      Divergence = "fork"
+	DivergenceRefuse    = sessionrestore.DivergenceRefuse
+	DivergenceKeepLocal = sessionrestore.DivergenceKeepLocal
+	DivergenceReplace   = sessionrestore.DivergenceReplace
+	DivergenceFork      = sessionrestore.DivergenceFork
 )
-
-// SessionMode mirrors sessionrestore.Mode, how the picked history lands.
-type SessionMode string
 
 // SessionMode values.
 const (
-	ModeFresh       SessionMode = "fresh"
-	ModeFastForward SessionMode = "fast-forward"
-	ModeReplace     SessionMode = "replace"
-	ModeFork        SessionMode = "fork"
-	ModeKeepLocal   SessionMode = "keep-local"
+	ModeFresh       = sessionrestore.ModeFresh
+	ModeFastForward = sessionrestore.ModeFastForward
+	ModeReplace     = sessionrestore.ModeReplace
+	ModeFork        = sessionrestore.ModeFork
+	ModeKeepLocal   = sessionrestore.ModeKeepLocal
 )
 
-// Launch mirrors sessionrestore.Launch: how to resume an installed session.
-type Launch struct {
-	Argv     []string          `json:"argv"`
-	Dir      string            `json:"dir"`
-	EnvUnset []string          `json:"env_unset"`
-	EnvSet   map[string]string `json:"env_set"`
-}
-
-// SessionPlan is what pickup reads from a prepared session: its local id
-// (new only for a fork), its source id, the install mode, and its launch.
-type SessionPlan struct {
-	SessionID       claudenative.SessionID
-	SourceSessionID claudenative.SessionID
-	Mode            SessionMode
-	Launch          Launch
-}
-
-// ErrLiveLocal mirrors sessionrestore.ErrLiveLocal: the session runs on this host.
-var ErrLiveLocal = errors.New("session is live locally")
-
-// DivergentLocalError mirrors sessionrestore.DivergentLocalError: a local
-// copy holds records the picked checkpoint lacks.
-type DivergentLocalError struct {
-	SessionID         claudenative.SessionID
-	LocalPath         string
-	LocalLeafUUID     string
-	LocalLastActivity time.Time
-	PickedLeafUUID    string
-	PickedCapturedAt  time.Time
-}
-
-func (e *DivergentLocalError) Error() string {
-	return fmt.Sprintf("session %s: local copy %s diverges from the picked checkpoint (local leaf %s at %s, picked leaf %s captured %s)",
-		e.SessionID, e.LocalPath, e.LocalLeafUUID, e.LocalLastActivity.Format(time.RFC3339),
-		e.PickedLeafUUID, e.PickedCapturedAt.Format(time.RFC3339))
-}
-
-// IncompatibleError mirrors sessionrestore.IncompatibleError: a concrete
-// capability or storage format the destination lacks.
-type IncompatibleError struct {
-	Capability string
-	Detail     string
-}
-
-func (e *IncompatibleError) Error() string {
-	return fmt.Sprintf("incompatible destination: %s: %s", e.Capability, e.Detail)
-}
+// ErrLiveLocal reports a session running on this host; pickup never overrides it.
+var ErrLiveLocal = sessionrestore.ErrLiveLocal
 
 // Pickup errors callers branch on.
 var (
@@ -221,20 +187,28 @@ type Checkpoint struct {
 }
 
 // Checkout is the checkout pickup restored or reused. Newer reports a reused
-// sibling left at an older snapshot than the one picked.
+// sibling left at an older snapshot than the one picked; Sparse holds the
+// source's sparse-checkout patterns, and SparseExpanded reports that pickup
+// expanded them to a full checkout instead of re-applying them.
 type Checkout struct {
-	Path       string   `json:"path"`
-	Branch     string   `json:"branch"`
-	Reused     bool     `json:"reused"`
-	Newer      bool     `json:"newer"`
-	LFSPending []string `json:"lfs_pending,omitempty"`
+	Path           string           `json:"path"`
+	Branch         string           `json:"branch"`
+	Reused         bool             `json:"reused"`
+	Newer          bool             `json:"newer"`
+	LFSPending     []string         `json:"lfs_pending,omitempty"`
+	Exact          bool             `json:"exact"`
+	Differences    []string         `json:"differences,omitempty"`
+	Sparse         *worktree.Sparse `json:"sparse,omitempty"`
+	SparseExpanded bool             `json:"sparse_expanded,omitempty"`
 }
 
-// Session is one session's outcome. Launch is set for every installed
-// session Orca did not resume; ForkedFrom names the source id of a fork.
+// Session is one session's outcome. Selected marks a session pickup was
+// asked to resume; Launch is set for every installed session Orca did not
+// resume; ForkedFrom names the source id of a fork.
 type Session struct {
 	SessionID  string  `json:"session_id"`
 	Status     Status  `json:"status"`
+	Selected   bool    `json:"selected"`
 	Reason     string  `json:"reason,omitempty"`
 	Launch     *Launch `json:"launch"`
 	ForkedFrom string  `json:"forked_from,omitempty"`

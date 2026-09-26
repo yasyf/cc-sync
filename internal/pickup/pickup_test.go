@@ -143,7 +143,8 @@ func (f *fakeSessions) Prepare(_ context.Context, dir string, t SessionTarget, d
 	}
 	plan := SessionPlan{
 		SessionID: claudenative.SessionID(meta.SessionID), SourceSessionID: claudenative.SessionID(meta.SessionID),
-		Mode: ModeFresh, Launch: Launch{Argv: []string{"claude", "--resume", meta.SessionID}, Dir: t.Cwd},
+		Mode: ModeFresh, RecoveryContext: "recovered " + meta.SessionID,
+		Launch: Launch{Argv: []string{"claude", "--resume", meta.SessionID}, Dir: t.Cwd},
 	}
 	if to, ok := f.forks[meta.SessionID]; ok {
 		plan.SessionID, plan.Mode = claudenative.SessionID(to), ModeFork
@@ -290,8 +291,8 @@ func (w *world) assertUnpinned() {
 func TestPickupWithOrca(t *testing.T) {
 	w := newWorld(t)
 	w.orca.result = orcabridge.ImportResult{WorktreeID: "orca-wt", Bindings: []orcabridge.ImportedBinding{
-		{ProviderSessionID: sidHuman, LocalPaneKey: "tab-9:leaf-1", Status: "resumed"},
-		{ProviderSessionID: sidIdle, LocalPaneKey: "tab-3:leaf-2", Status: "dormant"},
+		{Binding: orcabridge.RecoveryBindingKey{Agent: orcabridge.AgentClaude, Key: "session_id", ID: sidHuman}, LocalPaneKey: "tab-9:leaf-1", Status: "resumed"},
+		{Binding: orcabridge.RecoveryBindingKey{Agent: orcabridge.AgentClaude, Key: "session_id", ID: sidIdle}, LocalPaneKey: "tab-3:leaf-2", Status: "dormant"},
 	}}
 	res, err := w.run(Request{})
 	if err != nil {
@@ -301,7 +302,7 @@ func TestPickupWithOrca(t *testing.T) {
 		Checkpoint: Checkpoint{ID: "cp-good", CapturedAt: capturedAt},
 		Checkout:   Checkout{Path: dest, Branch: "recovery/feature-login"},
 		Sessions: []Session{
-			{SessionID: sidHuman, Status: StatusResumed},
+			{SessionID: sidHuman, Status: StatusResumed, Selected: true},
 			{SessionID: sidIdle, Status: StatusDormant, Launch: launch(sidIdle, dest)},
 		},
 		Orca: &OrcaResult{
@@ -333,7 +334,11 @@ func TestPickupWithOrca(t *testing.T) {
 			{From: source, To: dest},
 			{From: "/private/tmp/claude-501", To: "/tmp/claude-502"},
 		},
-		Resume: []string{sidHuman}, PreferClient: "client-7", RegisterRepo: true,
+		Resume: []orcabridge.BindingSelector{sidHuman}, PreferClient: "client-7", RegisterRepo: true,
+		RecoveryLaunch: map[string]orcabridge.RecoveryLaunch{
+			sidHuman: {AppendSystemPrompt: "recovered " + sidHuman},
+			sidIdle:  {AppendSystemPrompt: "recovered " + sidIdle},
+		},
 	}
 	if len(w.orca.reqs) != 1 || !reflect.DeepEqual(w.orca.reqs[0], wantImport) {
 		t.Errorf("import = %+v\nwant %+v", w.orca.reqs, wantImport)
@@ -368,7 +373,7 @@ func TestPickupWithoutOrca(t *testing.T) {
 				t.Fatalf("Run: %v", err)
 			}
 			want := []Session{
-				{SessionID: sidHuman, Status: StatusRestored, Launch: launch(sidHuman, dest+"/web")},
+				{SessionID: sidHuman, Status: StatusRestored, Selected: true, Launch: launch(sidHuman, dest+"/web")},
 				{SessionID: sidIdle, Status: StatusRestored, Launch: launch(sidIdle, dest)},
 			}
 			if res.Orca != nil || !reflect.DeepEqual(res.Sessions, want) {
@@ -429,7 +434,7 @@ func TestDivergence(t *testing.T) {
 				t.Errorf("fork session = %+v, want %s forked from %s", res.Sessions[0], sidFork, sidHuman)
 			}
 			req := w.orca.reqs[0]
-			if !reflect.DeepEqual(req.Resume, []string{sidFork}) ||
+			if !reflect.DeepEqual(req.Resume, []orcabridge.BindingSelector{sidFork}) ||
 				!reflect.DeepEqual(req.SessionIDMap, []orcabridge.SessionMapping{{From: sidHuman, To: sidFork}}) {
 				t.Errorf("import resume %v map %v, want the local fork id and its mapping", req.Resume, req.SessionIDMap)
 			}
@@ -454,14 +459,14 @@ func TestLiveRefusal(t *testing.T) {
 		w := newWorld(t)
 		w.sessions.errs = map[string]error{sidIdle: live}
 		w.orca.result = orcabridge.ImportResult{WorktreeID: "orca-wt", Bindings: []orcabridge.ImportedBinding{
-			{ProviderSessionID: sidHuman, LocalPaneKey: "tab-1:leaf-1", Status: "resumed"},
+			{Binding: orcabridge.RecoveryBindingKey{Agent: orcabridge.AgentClaude, Key: "session_id", ID: sidHuman}, LocalPaneKey: "tab-1:leaf-1", Status: "resumed"},
 		}}
 		res, err := w.run(Request{})
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 		want := []Session{
-			{SessionID: sidHuman, Status: StatusResumed},
+			{SessionID: sidHuman, Status: StatusResumed, Selected: true},
 			{SessionID: sidIdle, Status: StatusRefused, Reason: ReasonLiveLocal},
 		}
 		if !reflect.DeepEqual(res.Sessions, want) || !reflect.DeepEqual(w.sessions.applied, []string{sidHuman}) {
@@ -585,13 +590,13 @@ func TestSelection(t *testing.T) {
 		name       string
 		req        Request
 		checkpoint string
-		resume     []string
+		resume     []orcabridge.BindingSelector
 		err        error
 	}{
-		{"session target resumes it", Request{Target: cli.SessionRef{ID: "bbbb"}}, "cp-good", []string{sidIdle}, nil},
-		{"source-qualified session", Request{Target: cli.SessionRef{Source: "alice", ID: sidHuman}}, "cp-good", []string{sidHuman}, nil},
-		{"explicit resume", Request{Resume: []string{"bbbb", "aaaa"}}, "cp-good", []string{sidHuman, sidIdle}, nil},
-		{"hourly", Request{Checkpoint: cli.CheckpointHourly{HoursAgo: 0}}, "cp-good", []string{sidHuman}, nil},
+		{"session target resumes it", Request{Target: cli.SessionRef{ID: "bbbb"}}, "cp-good", []orcabridge.BindingSelector{sidIdle}, nil},
+		{"source-qualified session", Request{Target: cli.SessionRef{Source: "alice", ID: sidHuman}}, "cp-good", []orcabridge.BindingSelector{sidHuman}, nil},
+		{"explicit resume", Request{Resume: []string{"bbbb", "aaaa"}}, "cp-good", []orcabridge.BindingSelector{sidHuman, sidIdle}, nil},
+		{"hourly", Request{Checkpoint: cli.CheckpointHourly{HoursAgo: 0}}, "cp-good", []orcabridge.BindingSelector{sidHuman}, nil},
 		{"at before capture", Request{Checkpoint: cli.CheckpointAt{Time: capturedAt.Add(-time.Second)}}, "", nil, ErrNotFound},
 		{"unknown item", Request{Target: cli.ItemRef{SourceHostID: "alice", WorkspaceID: "nope"}}, "", nil, ErrNotFound},
 		{"unknown session", Request{Target: cli.SessionRef{ID: "ffff"}}, "", nil, ErrNotFound},

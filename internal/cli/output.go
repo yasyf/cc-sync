@@ -279,6 +279,16 @@ func renderPickup(p *printer, res PickupResult, launching *PickedSession) {
 		verb = "reused"
 	}
 	p.printf("checkout %s: %s on %s\n", verb, res.Checkout.Path, formatOptional(res.Checkout.Branch, "(detached)"))
+	if res.Checkpoint.Partial {
+		p.printf("partial checkpoint %s: code deferred (%s)\n", res.Checkpoint.ID, res.Checkpoint.CodeDeferred)
+	}
+	if s := res.Checkout.Sparse; s != nil {
+		if s.Expanded {
+			p.printf("sparse checkout expanded to full (patterns %s); rerun with --apply-sparse to keep it sparse\n", strings.Join(s.Patterns, ", "))
+		} else {
+			p.printf("sparse checkout kept (patterns %s)\n", strings.Join(s.Patterns, ", "))
+		}
+	}
 	for _, s := range res.Sessions {
 		line := fmt.Sprintf("session %s: %s", s.SessionID, s.Status)
 		if s.Reason != "" {

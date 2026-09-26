@@ -7,7 +7,7 @@ import (
 
 func TestImportArgsSessionMap(t *testing.T) {
 	args, err := importArgs(ImportRequest{
-		Checkout: "/dst", CheckpointID: "cp-1", Resume: []string{"local-b"},
+		Checkout: "/dst", CheckpointID: "cp-1", Resume: []BindingSelector{"local-b"},
 		SessionIDMap: []SessionMapping{{From: "src-a", To: "local-a"}, {From: "src-b", To: "local-b"}},
 	})
 	if err != nil {

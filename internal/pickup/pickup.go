@@ -64,11 +64,13 @@ type Config struct {
 // Request is one pickup. Resume names the sessions to resume (full ids or
 // unique prefixes); empty resumes the session a session target named, else
 // the checkpoint's most recent human session. AllowPartial admits an
-// explicitly selected mixed checkpoint.
+// explicitly selected mixed checkpoint; ApplySparse keeps a sparse source's
+// recovery checkout sparse.
 type Request struct {
 	Target       cli.Target
 	Checkpoint   cli.CheckpointSelector
 	AllowPartial bool
+	ApplySparse  bool
 	Resume       []string
 	OnDivergence Divergence
 	NoOrca       bool
@@ -153,7 +155,7 @@ func (p *Pickup) Run(ctx context.Context, req Request) (res Result, err error) {
 	if err := r.restoreSessions(ctx, parts, selected); err != nil {
 		return Result{}, err
 	}
-	res = r.result()
+	res = r.result(selected)
 	if req.DryRun || req.NoOrca || p.cfg.Orca == nil || parts.descriptor == nil {
 		return res, nil
 	}
@@ -253,7 +255,7 @@ func (r *run) restoreCode(ctx context.Context, code *artifact.Ref, dest string) 
 		r.restored = Restored{Path: dest, Branch: r.pick.worktree.Repo.Branch}
 		return nil
 	}
-	restored, err := r.cfg.Code.Restore(ctx, r.store, *code, RestoreOptions{Dest: dest, FetchLFS: r.cfg.FetchAllowed()})
+	restored, err := r.cfg.Code.Restore(ctx, r.store, *code, RestoreOptions{Dest: dest, FetchLFS: r.cfg.FetchAllowed(), ApplySparse: r.req.ApplySparse})
 	if err != nil {
 		return fmt.Errorf("restore code to %s: %w", dest, err)
 	}
@@ -341,23 +343,25 @@ func refusal(err error) (string, bool) {
 	return "", false
 }
 
-func (r *run) result() Result {
+func (r *run) result(selected map[claudenative.SessionID]bool) Result {
 	cp := r.pick.checkpoint
 	res := Result{
 		Checkpoint: Checkpoint{ID: cp.ID, CapturedAt: cp.CapturedAt, Partial: cp.Deferred != "", CodeDeferred: cp.Deferred},
 		Checkout: Checkout{
 			Path: r.restored.Path, Branch: r.restored.Branch, Reused: r.restored.Reused,
 			Newer: r.restored.Newer, LFSPending: r.restored.LFSPending,
+			Exact: r.restored.Exact, Differences: r.restored.Differences,
+			Sparse: r.restored.Sparse, SparseExpanded: r.restored.Sparse != nil && !r.req.ApplySparse,
 		},
 		Sessions: make([]Session, 0, len(r.sessions)),
 	}
 	for _, s := range r.sessions {
 		if s.session == nil {
-			res.Sessions = append(res.Sessions, Session{SessionID: string(s.source), Status: StatusRefused, Reason: s.refused})
+			res.Sessions = append(res.Sessions, Session{SessionID: string(s.source), Status: StatusRefused, Selected: selected[s.source], Reason: s.refused})
 			continue
 		}
 		plan := s.session.Plan()
-		out := Session{SessionID: string(plan.SessionID), Status: StatusRestored, Launch: &plan.Launch}
+		out := Session{SessionID: string(plan.SessionID), Status: StatusRestored, Selected: selected[s.source], Launch: &plan.Launch}
 		if plan.Mode == ModeFork {
 			out.ForkedFrom = string(plan.SourceSessionID)
 		}
@@ -368,12 +372,13 @@ func (r *run) result() Result {
 
 func (r *run) importOrca(ctx context.Context, descriptor []byte, selected map[claudenative.SessionID]bool, res Result) (Result, error) {
 	req := orcabridge.ImportRequest{
-		Descriptor:   descriptor,
-		Checkout:     r.restored.Path,
-		CheckpointID: r.pick.checkpoint.ID,
-		PathMap:      r.orcaPathMap(),
-		PreferClient: r.cfg.PreferClient,
-		RegisterRepo: true,
+		Descriptor:     descriptor,
+		Checkout:       r.restored.Path,
+		CheckpointID:   r.pick.checkpoint.ID,
+		PathMap:        r.orcaPathMap(),
+		PreferClient:   r.cfg.PreferClient,
+		RegisterRepo:   true,
+		RecoveryLaunch: map[string]orcabridge.RecoveryLaunch{},
 	}
 	for _, s := range r.sessions {
 		if s.session == nil {
@@ -381,7 +386,10 @@ func (r *run) importOrca(ctx context.Context, descriptor []byte, selected map[cl
 		}
 		plan := s.session.Plan()
 		if selected[s.source] {
-			req.Resume = append(req.Resume, string(plan.SessionID))
+			req.Resume = append(req.Resume, orcabridge.BindingSelector(plan.SessionID))
+		}
+		if plan.RecoveryContext != "" {
+			req.RecoveryLaunch[string(plan.SourceSessionID)] = orcabridge.RecoveryLaunch{AppendSystemPrompt: plan.RecoveryContext}
 		}
 		if plan.SessionID != plan.SourceSessionID {
 			req.SessionIDMap = append(req.SessionIDMap, orcabridge.SessionMapping{From: string(plan.SourceSessionID), To: string(plan.SessionID)})
@@ -400,7 +408,7 @@ func (r *run) importOrca(ctx context.Context, descriptor []byte, selected map[cl
 	orca := &OrcaResult{ExecutionHostID: "local", WorktreeID: out.WorktreeID, Resumed: []ResumedTab{}, Dormant: []string{}}
 	bindings := make(map[string]orcabridge.ImportedBinding, len(out.Bindings))
 	for _, b := range out.Bindings {
-		bindings[b.ProviderSessionID] = b
+		bindings[b.Binding.ID] = b
 	}
 	for i, s := range res.Sessions {
 		b, ok := bindings[s.SessionID]
@@ -416,15 +424,22 @@ func (r *run) importOrca(ctx context.Context, descriptor []byte, selected map[cl
 			orca.Dormant = append(orca.Dormant, s.SessionID)
 			res.Sessions[i].Status = StatusDormant
 		case "refused":
-			res.Sessions[i].Status, res.Sessions[i].Reason = StatusRefused, b.Reason
+			res.Sessions[i].Status, res.Sessions[i].Reason = StatusRefused, refusedReason(b.Reason)
 		default:
-			return Result{}, fmt.Errorf("orca import: binding %s has status %q", b.ProviderSessionID, b.Status)
+			return Result{}, fmt.Errorf("orca import: binding %s has status %q", b.Binding.ID, b.Status)
 		}
 	}
 	resumed, requested := len(orca.Resumed), len(req.Resume)
 	r.progress(cli.PhaseOrcaResume, &resumed, &requested)
 	res.Orca = orca
 	return res, nil
+}
+
+func refusedReason(orcaCode string) string {
+	if orcaCode == orcabridge.CodeSessionLiveLocally {
+		return ReasonLiveLocal
+	}
+	return orcaCode
 }
 
 func (r *run) readDescriptor(ctx context.Context, ref artifact.Ref) ([]byte, error) {

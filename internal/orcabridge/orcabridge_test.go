@@ -22,6 +22,8 @@ dir="$FAKE_ORCA_DIR"
 call=$(printf '%s/calls/%04d' "$dir" "$(ls "$dir/calls" | wc -l | tr -d ' ')")
 mkdir "$call"
 for a in "$@"; do printf '%s\n' "$a"; done > "$call/argv"
+prev=
+for a in "$@"; do [ "$prev" = --recovery-launch-file ] && cp "$a" "$call/launch"; prev=$a; done
 env > "$call/env"
 cat > "$call/stdin"
 key=$1
@@ -34,7 +36,7 @@ exit "$(cat "$dir/$key.exit")"
 const (
 	goldenRuntimeID = "00000000-0000-4000-8000-000000000001"
 	describeLocal   = `{"id":"local","ok":true,"result":{"protocol":1,"runtimeId":"` + goldenRuntimeID + `","executionHostId":"local","appVersion":"1.4.212","platform":"darwin","machineName":"test-mac","hostKind":"desktop","localClientInstanceId":null,"capabilities":["cross-machine-recovery.workspace.v1"]},"_meta":{"runtimeId":"` + goldenRuntimeID + `"}}`
-	importResult    = `{"id":"local","ok":true,"result":{"importKey":"key-1","disposition":"imported","repoId":"repo-1","worktreeId":"repo-1::/dst","instanceId":"inst-1","presentationSource":{"kind":"client-view","clientKey":"local-renderer"},"idMap":{"tabs":{"t1":"t9"},"groups":{"g1":"g9"},"leaves":{"l1":"l9"},"browsers":{}},"bindings":[{"sourcePaneKey":"t1:l1","localPaneKey":"t9:l9","providerSessionId":"sess-1","status":"resumed","terminalHandle":"term-1"},{"sourcePaneKey":"t1:l2","localPaneKey":"t9:l8","providerSessionId":"sess-2","status":"dormant"}],"provenance":{"importKey":"key-1"}}}`
+	importResult    = `{"id":"local","ok":true,"result":{"importKey":"key-1","disposition":"imported","repoId":"repo-1","worktreeId":"repo-1::/dst","instanceId":"inst-1","presentationSource":{"kind":"client-view","clientKey":"local-renderer"},"idMap":{"tabs":{"t1":"t9"},"groups":{"g1":"g9"},"leaves":{"l1":"l9"},"browsers":{}},"bindings":[{"sourcePaneKey":"t1:l1","localPaneKey":"t9:l9","binding":{"agent":"claude","key":"session_id","id":"sess-1"},"status":"resumed","terminalHandle":"term-1"},{"sourcePaneKey":"t1:l2","localPaneKey":"t9:l8","binding":{"agent":"claude","key":"session_id","id":"sess-2"},"status":"dormant"}],"provenance":{"importKey":"key-1"}}}`
 	resumeResult    = `{"ok":true,"result":{"terminalHandle":"term-2","disposition":"created","localPaneKey":"t9:l8"}}`
 	listResult      = `{"ok":true,"result":{"bindings":[{"localPaneKey":"t9:l8","worktreeId":"repo-1::/dst","providerSession":{"key":"session_id","id":"sess-2","transcriptPath":"/dst/sess-2.jsonl"},"provenance":{"importKey":"key-1"}}]}}`
 	activityResult  = `{"ok":true,"result":{"workspaces":[{"worktreeId":"repo-1::/dst","path":"/dst","lastHumanInputAt":1790000000123,"lastHumanFocusAt":null}]}}`
@@ -349,7 +351,7 @@ func TestEveryVerbRunsLocallyWithExactArgv(t *testing.T) {
 		Checkout:     "/dst",
 		CheckpointID: "cp-1",
 		PathMap:      []PathMapping{{From: "/src/wt", To: "/dst"}, {From: "/home/a/.claude/projects/-src-wt", To: "/home/b/.claude/projects/-dst"}},
-		Resume:       []string{"sess-1", "sess-3"},
+		Resume:       []BindingSelector{"sess-1", "sess-3"},
 		PreferClient: "client-7",
 		Activate:     true,
 		RegisterRepo: true,
@@ -433,8 +435,8 @@ func TestResultsDecode(t *testing.T) {
 		PresentationSource: PresentationSource{Kind: "client-view", ClientKey: "local-renderer"},
 		IDMap:              IDMap{Tabs: map[string]string{"t1": "t9"}, Groups: map[string]string{"g1": "g9"}, Leaves: map[string]string{"l1": "l9"}, Browsers: map[string]string{}},
 		Bindings: []ImportedBinding{
-			{SourcePaneKey: "t1:l1", LocalPaneKey: "t9:l9", ProviderSessionID: "sess-1", Status: "resumed", TerminalHandle: "term-1"},
-			{SourcePaneKey: "t1:l2", LocalPaneKey: "t9:l8", ProviderSessionID: "sess-2", Status: "dormant"},
+			{SourcePaneKey: "t1:l1", LocalPaneKey: "t9:l9", Binding: RecoveryBindingKey{Agent: AgentClaude, Key: "session_id", ID: "sess-1"}, Status: "resumed", TerminalHandle: "term-1"},
+			{SourcePaneKey: "t1:l2", LocalPaneKey: "t9:l8", Binding: RecoveryBindingKey{Agent: AgentClaude, Key: "session_id", ID: "sess-2"}, Status: "dormant"},
 		},
 		Provenance: json.RawMessage(`{"importKey":"key-1"}`),
 	}

@@ -420,11 +420,37 @@ type InspectResult struct {
 	Delivery    Array[Delivery]         `json:"delivery"`
 }
 
-// PickupCheckout is the checkout pickup restored or reused.
+// PickupCheckpoint is the checkpoint pickup restored; Partial marks a
+// partial checkpoint whose code is older than its sessions, and CodeDeferred
+// says why its code capture was deferred.
+type PickupCheckpoint struct {
+	ID           string `json:"id"`
+	CapturedAt   Time   `json:"captured_at"`
+	Partial      bool   `json:"partial"`
+	CodeDeferred string `json:"code_deferred,omitempty"`
+}
+
+// PickupCheckout is the checkout pickup restored or reused. Newer marks a
+// reused checkout left at an older snapshot than the one picked; Exact
+// reports that the checkout matches the snapshot, Differences listing every
+// mismatch otherwise; Sparse is set when the source checkout was sparse.
 type PickupCheckout struct {
-	Path   string  `json:"path"`
-	Branch *string `json:"branch"`
-	Reused bool    `json:"reused"`
+	Path        string          `json:"path"`
+	Branch      *string         `json:"branch"`
+	Reused      bool            `json:"reused"`
+	Newer       bool            `json:"newer"`
+	LFSPending  Array[string]   `json:"lfs_pending"`
+	Exact       bool            `json:"exact"`
+	Differences Array[string]   `json:"differences"`
+	Sparse      *SparseCheckout `json:"sparse"`
+}
+
+// SparseCheckout is a sparse source checkout's patterns; Expanded reports
+// that pickup restored a full checkout instead (rerun with --apply-sparse).
+type SparseCheckout struct {
+	Cone     bool          `json:"cone"`
+	Patterns Array[string] `json:"patterns"`
+	Expanded bool          `json:"expanded"`
 }
 
 // Launch is how to continue a restored session natively: run Argv in Dir with
@@ -470,9 +496,10 @@ type OrcaPickup struct {
 
 // PickupResult is the payload of `cc-sync pickup`.
 type PickupResult struct {
-	Checkout PickupCheckout       `json:"checkout"`
-	Sessions Array[PickedSession] `json:"sessions"`
-	Orca     *OrcaPickup          `json:"orca"`
+	Checkpoint PickupCheckpoint     `json:"checkpoint"`
+	Checkout   PickupCheckout       `json:"checkout"`
+	Sessions   Array[PickedSession] `json:"sessions"`
+	Orca       *OrcaPickup          `json:"orca"`
 }
 
 // Progress is one --progress ndjson line.

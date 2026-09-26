@@ -33,6 +33,7 @@ const (
 	CodeDescriptorTooLarge  = "recovery_descriptor_too_large"
 	CodeSessionLiveLocally  = "recovery_session_live_locally"
 	CodeBindingNotFound     = "recovery_binding_not_found"
+	CodeBindingAmbiguous    = "recovery_binding_ambiguous"
 	CodeSelectorNotFound    = "selector_not_found"
 	CodeRuntimeAccessDenied = "runtime_access_denied"
 	CodeInvalidArgument     = "invalid_argument"

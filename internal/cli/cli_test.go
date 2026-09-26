@@ -70,6 +70,7 @@ func TestJSONGolden(t *testing.T) {
 		{"pickup_cli_only", &fakeService{pickup: cliOnlyPickup()}, []string{"pickup", "0f3c", "--no-orca", "--json"}},
 		{"pickup_orca_empty", &fakeService{pickup: cli.PickupResult{Orca: &cli.OrcaPickup{WorktreeID: "orca-wt-9"}}}, []string{"pickup", "0f3c", "--json"}},
 		{"pickup_fork_refused", &fakeService{pickup: forkRefusedPickup()}, []string{"pickup", "0f3c", "--on-divergence", "fork", "--json"}},
+		{"pickup_partial_sparse", &fakeService{pickup: partialSparsePickup()}, []string{"pickup", "0f3c", "--checkpoint", "d00d", "--allow-partial", "--json"}},
 		{"sync", &fakeService{sync: cli.SyncResult{Worktrees: []cli.SyncedWorktree{
 			{WorkspaceID: "wt-7f3a", Sessions: []string{"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"}, Checkpoint: &cli.Checkpoint{ID: "c0ffee1234", Tier: cli.TierLatest, CapturedAt: ts(12, 0)}},
 			{WorkspaceID: "wt-01", Deferred: []string{"lfs object missing: assets/model.bin"}},
@@ -103,6 +104,7 @@ func TestHumanGolden(t *testing.T) {
 		{"pickup_cli_only", &fakeService{pickup: cliOnlyPickup()}, []string{"pickup", "0f3c"}},
 		{"pickup_orca", &fakeService{pickup: orcaPickup()}, []string{"pickup", "0f3c"}},
 		{"pickup_fork_refused", &fakeService{pickup: forkRefusedPickup()}, []string{"pickup", "0f3c", "--on-divergence", "fork"}},
+		{"pickup_partial_sparse", &fakeService{pickup: partialSparsePickup()}, []string{"pickup", "0f3c", "--checkpoint", "d00d", "--allow-partial"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -264,7 +266,7 @@ func TestInteractivePickup(t *testing.T) {
 		},
 		{
 			name: "json never execs", pickup: cliOnlyPickup(), interactive: true, args: []string{"pickup", "0f3c", "--no-orca", "--json"},
-			wantStdout: `{"version":1,"ok":true,"checkout":{"path":"/Users/yasyf/Code/monorepo-recovered","branch":null,"reused":true},"sessions":[{"session_id":"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90","status":"restored","selected":true,"launch":{"argv":["/opt/homebrew/bin/claude","--resume","0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"],"dir":"/Users/yasyf/Code/monorepo-recovered","env_unset":["CLAUDECODE","CLAUDE_CODE_ENTRYPOINT"],"env_set":{}}}],"orca":null}` + "\n",
+			wantStdout: `{"version":1,"ok":true,"checkpoint":{"id":"c0ffee12","captured_at":"2026-09-26T12:00:00Z","partial":false},"checkout":{"path":"/Users/yasyf/Code/monorepo-recovered","branch":null,"reused":true,"newer":false,"lfs_pending":[],"exact":false,"differences":[],"sparse":null},"sessions":[{"session_id":"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90","status":"restored","selected":true,"launch":{"argv":["/opt/homebrew/bin/claude","--resume","0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"],"dir":"/Users/yasyf/Code/monorepo-recovered","env_unset":["CLAUDECODE","CLAUDE_CODE_ENTRYPOINT"],"env_set":{}}}],"orca":null}` + "\n",
 			wantPickup: true,
 		},
 		{
@@ -385,9 +387,11 @@ func TestRequests(t *testing.T) {
 			Checkpoint:   cli.LatestCheckpoint{},
 			OnDivergence: cli.DivergenceRefuse,
 		}},
-		{"pickup all flags", []string{"pickup", "host-mbp/wt-7f3a", "--checkpoint", "at:2026-09-26T12:00:00-07:00", "--resume", "0f3c", "--resume", "7a1e", "--on-divergence", "keep-local", "--no-orca", "--dry-run", "--progress", "ndjson"}, cli.PickupRequest{
+		{"pickup all flags", []string{"pickup", "host-mbp/wt-7f3a", "--checkpoint", "at:2026-09-26T12:00:00-07:00", "--resume", "0f3c", "--resume", "7a1e", "--on-divergence", "keep-local", "--no-orca", "--dry-run", "--progress", "ndjson", "--allow-partial", "--apply-sparse"}, cli.PickupRequest{
 			Target:       cli.ItemRef{SourceHostID: "host-mbp", WorkspaceID: "wt-7f3a"},
 			Checkpoint:   cli.CheckpointAt{Time: at},
+			AllowPartial: true,
+			ApplySparse:  true,
 			Resume:       []string{"0f3c", "7a1e"},
 			OnDivergence: cli.DivergenceKeepLocal,
 			NoOrca:       true,

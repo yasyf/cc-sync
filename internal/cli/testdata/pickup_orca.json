@@ -1,10 +1,20 @@
 {
   "version": 1,
   "ok": true,
+  "checkpoint": {
+    "id": "c0ffee12",
+    "captured_at": "2026-09-26T12:00:00Z",
+    "partial": false
+  },
   "checkout": {
     "path": "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200",
     "branch": "feature/sync",
-    "reused": false
+    "reused": false,
+    "newer": false,
+    "lfs_pending": [],
+    "exact": false,
+    "differences": [],
+    "sparse": null
   },
   "sessions": [
     {

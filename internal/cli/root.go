@@ -399,6 +399,8 @@ func (a *app) pickupCmd() *cobra.Command {
 	cmd.Flags().StringVar(&checkpoint, "checkpoint", "latest", "latest, <id-prefix>, at:<RFC3339>, hourly:-<N>h, or daily:<YYYY-MM-DD>")
 	cmd.Flags().StringArrayVar(&req.Resume, "resume", nil, "resume this session id; others import dormant (repeatable)")
 	cmd.Flags().Var(&req.OnDivergence, "on-divergence", "when a local copy of a picked session diverged: refuse, keep-local, replace, or fork")
+	cmd.Flags().BoolVar(&req.AllowPartial, "allow-partial", false, "restore the partial checkpoint --checkpoint names, whose code is older than its sessions")
+	cmd.Flags().BoolVar(&req.ApplySparse, "apply-sparse", false, "keep a sparse source checkout sparse instead of expanding it to a full checkout")
 	cmd.Flags().BoolVar(&req.NoOrca, "no-orca", false, "skip the Orca import")
 	cmd.Flags().BoolVar(&req.DryRun, "dry-run", false, "report what pickup would do without changing anything")
 	cmd.Flags().StringVar(&progress, "progress", "", "emit progress on stderr; the only format is ndjson")
