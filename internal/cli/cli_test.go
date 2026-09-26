@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -60,7 +61,7 @@ func TestJSONGolden(t *testing.T) {
 		{"list_full", &fakeService{list: cli.ListResult{
 			GeneratedAt: ts(12, 10),
 			Local:       cli.Host{HostID: "host-air", HostName: "air"},
-			Items:       []cli.Item{fullItem(), sparseItem()},
+			Items:       []cli.Item{fullItem(), deferredItem(), sparseItem()},
 		}}, []string{"list", "--json"}},
 		{"list_empty", &fakeService{list: cli.ListResult{GeneratedAt: ts(12, 10), Local: cli.Host{HostID: "host-air", HostName: "air"}}}, []string{"--json", "list"}},
 		{"inspect", &fakeService{inspect: fullInspect()}, []string{"inspect", "host-mbp/wt-7f3a", "--json"}},
@@ -68,6 +69,7 @@ func TestJSONGolden(t *testing.T) {
 		{"pickup_orca", &fakeService{pickup: orcaPickup()}, []string{"pickup", "host-mbp/wt-7f3a", "--json"}},
 		{"pickup_cli_only", &fakeService{pickup: cliOnlyPickup()}, []string{"pickup", "0f3c", "--no-orca", "--json"}},
 		{"pickup_orca_empty", &fakeService{pickup: cli.PickupResult{Orca: &cli.OrcaPickup{WorktreeID: "orca-wt-9"}}}, []string{"pickup", "0f3c", "--json"}},
+		{"pickup_fork_refused", &fakeService{pickup: forkRefusedPickup()}, []string{"pickup", "0f3c", "--on-divergence", "fork", "--json"}},
 		{"sync", &fakeService{sync: cli.SyncResult{Worktrees: []cli.SyncedWorktree{
 			{WorkspaceID: "wt-7f3a", Sessions: []string{"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"}, Checkpoint: &cli.Checkpoint{ID: "c0ffee1234", Tier: cli.TierLatest, CapturedAt: ts(12, 0)}},
 			{WorkspaceID: "wt-01", Deferred: []string{"lfs object missing: assets/model.bin"}},
@@ -94,11 +96,13 @@ func TestHumanGolden(t *testing.T) {
 		args []string
 	}{
 		{"status", &fakeService{status: fullStatus()}, []string{"status"}},
-		{"list", &fakeService{list: cli.ListResult{Items: []cli.Item{fullItem(), sparseItem()}}}, []string{"list"}},
+		{"list", &fakeService{list: cli.ListResult{Items: []cli.Item{fullItem(), deferredItem(), sparseItem()}}}, []string{"list"}},
 		{"list_empty", &fakeService{}, []string{"list"}},
 		{"inspect", &fakeService{inspect: fullInspect()}, []string{"inspect", "host-mbp/wt-7f3a"}},
+		{"inspect_deferred", &fakeService{inspect: cli.InspectResult{Item: deferredItem()}}, []string{"inspect", "host-mbp/wt-9c1d"}},
 		{"pickup_cli_only", &fakeService{pickup: cliOnlyPickup()}, []string{"pickup", "0f3c"}},
 		{"pickup_orca", &fakeService{pickup: orcaPickup()}, []string{"pickup", "0f3c"}},
+		{"pickup_fork_refused", &fakeService{pickup: forkRefusedPickup()}, []string{"pickup", "0f3c", "--on-divergence", "fork"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,7 +138,8 @@ func TestJSONErrors(t *testing.T) {
 		{"wrapped live collision", errors.Join(errors.New("pickup"), cli.Errorf(cli.CodeLiveLocalCollision, "session live")), []string{"pickup", "0f3c", "--json"}, "live-local-collision", "pickup\nsession live", 4},
 		{"orca not local", cli.Errorf(cli.CodeOrcaNotLocal, "orca targets a remote runtime"), []string{"pickup", "0f3c", "--json"}, "orca-not-local", "orca targets a remote runtime", 4},
 		{"checkout conflict", cli.Errorf(cli.CodeCheckoutConflict, "dest exists"), []string{"pickup", "0f3c", "--json"}, "checkout-conflict", "dest exists", 4},
-		{"unsupported", cli.Errorf(cli.CodeUnsupported, "claude 9.9.9 untested"), []string{"pickup", "0f3c", "--json"}, "unsupported", "claude 9.9.9 untested", 4},
+		{"unsupported", cli.Errorf(cli.CodeUnsupported, "folder workspaces are not recoverable"), []string{"pickup", "0f3c", "--json"}, "unsupported", "folder workspaces are not recoverable", 4},
+		{"incompatible", cli.Errorf(cli.CodeIncompatible, "destination claude does not advertise --resume"), []string{"pickup", "0f3c", "--json"}, "incompatible", "destination claude does not advertise --resume", 4},
 		{"orca unavailable", cli.Errorf(cli.CodeOrcaUnavailable, "orca not running"), []string{"pickup", "0f3c", "--json"}, "orca-unavailable", "orca not running", 5},
 		{"helper unavailable", cli.Errorf(cli.CodeUnavailable, "helper not running"), []string{"status", "--json"}, "unavailable", "helper not running", 5},
 		{"internal", errors.New("boom"), []string{"list", "--json"}, "internal", "boom", 1},
@@ -146,6 +151,7 @@ func TestJSONErrors(t *testing.T) {
 		{"bad selector", nil, []string{"inspect", "/wt", "--json"}, "usage", `invalid item selector "/wt": want <source_host_id>/<workspace_id>`, 2},
 		{"bad checkpoint", nil, []string{"pickup", "0f3c", "--checkpoint", "yesterday", "--json"}, "usage", `invalid checkpoint "yesterday": want latest, <id-prefix>, at:<RFC3339>, hourly:-<N>h, or daily:<YYYY-MM-DD>`, 2},
 		{"bad progress", nil, []string{"pickup", "0f3c", "--progress", "xml", "--json"}, "usage", `invalid --progress "xml": want ndjson`, 2},
+		{"bad on-divergence", nil, []string{"pickup", "0f3c", "--on-divergence", "merge", "--json"}, "usage", `invalid argument "merge" for "--on-divergence" flag: want refuse, keep-local, replace, or fork`, 2},
 		{"bad resume id", nil, []string{"pickup", "0f3c", "--resume", "NOPE", "--json"}, "usage", `invalid session id "NOPE": want a lowercase session id or prefix`, 2},
 		{"bad sync session", nil, []string{"sync", "--session", "x", "--json"}, "usage", `invalid session id "x": want a lowercase session id or prefix`, 2},
 		{"json equals true", cli.Errorf(cli.CodeNotFound, "none"), []string{"list", "--json=true"}, "not-found", "none", 3},
@@ -168,6 +174,148 @@ func TestJSONErrors(t *testing.T) {
 			}
 			if env.Version != 1 || env.OK || env.Error.Code != tt.wantCode || env.Error.Message != tt.wantMsg {
 				t.Errorf("envelope = %+v, want version 1, ok false, code %q, message %q", env, tt.wantCode, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestDivergenceError(t *testing.T) {
+	err := fmt.Errorf("pickup: %w", cli.DivergentLocalCopy(
+		cli.DivergenceDetails{SessionID: humanSession, LocalLastActivityAt: ts(12, 30), PickedCapturedAt: ts(12, 0)},
+		errors.New("session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 has local records the picked checkpoint lacks"),
+	))
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			"json",
+			[]string{"pickup", "0f3c", "--json"},
+			`{"version":1,"ok":false,"error":{"code":"divergent-local-copy","message":"pickup: session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 has local records the picked checkpoint lacks","details":{"session_id":"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90","local_last_activity_at":"2026-09-26T19:30:00Z","picked_captured_at":"2026-09-26T19:00:00Z"}}}` + "\n",
+			"",
+		},
+		{
+			"human",
+			[]string{"pickup", "0f3c"},
+			"",
+			"cc-sync: pickup: session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 has local records the picked checkpoint lacks\ncc-sync: re-run with --on-divergence keep-local, replace, or fork\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := run(&fakeService{err: err}, tt.args...)
+			if got.exit != cli.ExitRefused || got.stdout != tt.wantStdout || got.stderr != tt.wantStderr {
+				t.Errorf("got exit %d stdout %q stderr %q; want exit 4 stdout %q stderr %q", got.exit, got.stdout, got.stderr, tt.wantStdout, tt.wantStderr)
+			}
+		})
+	}
+}
+
+func TestInteractivePickup(t *testing.T) {
+	launchEnv := []string{"HOME=/Users/yasyf", "PATH=/usr/bin:/bin", "TERM=xterm-256color"}
+	withEnvSet := cliOnlyPickup()
+	withEnvSet.Sessions[0].Launch.EnvSet = cli.Env{"PATH": "/opt/homebrew/bin:/usr/bin", "CC_SYNC_PICKED": "1"}
+	twoRestored := cliOnlyPickup()
+	twoRestored.Sessions = append(twoRestored.Sessions, cli.PickedSession{
+		SessionID: backgroundSession, Status: cli.SessionRestored, Selected: true, Launch: claudeLaunch("/Users/yasyf/Code/monorepo-recovered", backgroundSession),
+	})
+	noLaunch := cliOnlyPickup()
+	noLaunch.Sessions[0].Launch = nil
+	tests := []struct {
+		name        string
+		pickup      cli.PickupResult
+		interactive bool
+		execErr     error
+		args        []string
+		wantExit    int
+		wantStdout  string
+		wantStderr  string
+		wantCalls   []execCall
+		wantPickup  bool
+	}{
+		{
+			name: "cli-only execs the selected session", pickup: cliOnlyPickup(), interactive: true, args: []string{"pickup", "0f3c", "--no-orca"},
+			wantStdout: "checkout reused: /Users/yasyf/Code/monorepo-recovered on (detached)\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored\nresuming 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 with claude in /Users/yasyf/Code/monorepo-recovered\n",
+			wantCalls:  []execCall{{argv: []string{"/opt/homebrew/bin/claude", "--resume", humanSession}, dir: "/Users/yasyf/Code/monorepo-recovered", env: launchEnv}},
+			wantPickup: true,
+		},
+		{
+			name: "env adjustments", pickup: withEnvSet, interactive: true, args: []string{"pickup", "0f3c"},
+			wantStdout: "checkout reused: /Users/yasyf/Code/monorepo-recovered on (detached)\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored\nresuming 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 with claude in /Users/yasyf/Code/monorepo-recovered\n",
+			wantCalls: []execCall{{
+				argv: []string{"/opt/homebrew/bin/claude", "--resume", humanSession},
+				dir:  "/Users/yasyf/Code/monorepo-recovered",
+				env:  []string{"HOME=/Users/yasyf", "TERM=xterm-256color", "CC_SYNC_PICKED=1", "PATH=/opt/homebrew/bin:/usr/bin"},
+			}},
+			wantPickup: true,
+		},
+		{
+			name: "orca import without resume execs", pickup: orcaDormantPickup(), interactive: true, args: []string{"pickup", "0f3c"},
+			wantStdout: "checkout restored: " + recoveredCheckout + " on feature/sync\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: dormant\nsession 7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e: dormant\norca worktree orca-wt-9: 0 resumed, 2 dormant\nresuming 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 with claude in " + recoveredCheckout + "\n",
+			wantCalls:  []execCall{{argv: []string{"/opt/homebrew/bin/claude", "--resume", humanSession}, dir: recoveredCheckout, env: launchEnv}},
+			wantPickup: true,
+		},
+		{
+			name: "orca resumed never execs", pickup: orcaPickup(), interactive: true, args: []string{"pickup", "0f3c"},
+			wantStdout: "checkout restored: " + recoveredCheckout + " on feature/sync\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: resumed\nsession 7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e: dormant\norca worktree orca-wt-9: 1 resumed, 1 dormant\n",
+			wantPickup: true,
+		},
+		{
+			name: "json never execs", pickup: cliOnlyPickup(), interactive: true, args: []string{"pickup", "0f3c", "--no-orca", "--json"},
+			wantStdout: `{"version":1,"ok":true,"checkout":{"path":"/Users/yasyf/Code/monorepo-recovered","branch":null,"reused":true},"sessions":[{"session_id":"0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90","status":"restored","selected":true,"launch":{"argv":["/opt/homebrew/bin/claude","--resume","0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"],"dir":"/Users/yasyf/Code/monorepo-recovered","env_unset":["CLAUDECODE","CLAUDE_CODE_ENTRYPOINT"],"env_set":{}}}],"orca":null}` + "\n",
+			wantPickup: true,
+		},
+		{
+			name: "non-tty never execs", pickup: cliOnlyPickup(), args: []string{"pickup", "0f3c"},
+			wantStdout: "checkout reused: /Users/yasyf/Code/monorepo-recovered on (detached)\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored\nresume with: cc-sync resume 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90\n",
+			wantPickup: true,
+		},
+		{
+			name: "dry run never execs", pickup: cliOnlyPickup(), interactive: true, args: []string{"pickup", "0f3c", "--dry-run"},
+			wantStdout: "checkout reused: /Users/yasyf/Code/monorepo-recovered on (detached)\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored\nresume with: cc-sync resume 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90\n",
+			wantPickup: true,
+		},
+		{
+			name: "two selected without orca resume", pickup: twoRestored, interactive: true, args: []string{"pickup", "0f3c", "--resume", "0f3c", "--resume", "7a1e"},
+			wantExit:   cli.ExitUsage,
+			wantStderr: "cc-sync: sessions 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90, 7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e are restored but not resumed and one terminal resumes one session: run cc-sync resume <session> for each\n",
+			wantPickup: true,
+		},
+		{
+			name: "no-orca with two resumes refuses before pickup", pickup: twoRestored, interactive: true, args: []string{"pickup", "0f3c", "--no-orca", "--resume", "0f3c", "--resume", "7a1e"},
+			wantExit:   cli.ExitUsage,
+			wantStderr: "cc-sync: --no-orca selects 0f3c, 7a1e but one terminal resumes one session: pass one --resume, or --json for every session's launch\n",
+		},
+		{
+			name: "selected session without launch", pickup: noLaunch, interactive: true, args: []string{"pickup", "0f3c"},
+			wantExit:   cli.ExitError,
+			wantStderr: "cc-sync: selected session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 has no launch\n",
+			wantPickup: true,
+		},
+		{
+			name: "exec failure", pickup: cliOnlyPickup(), interactive: true, execErr: errors.New("exec /opt/homebrew/bin/claude: no such file or directory"), args: []string{"pickup", "0f3c"},
+			wantExit:   cli.ExitError,
+			wantStdout: "checkout reused: /Users/yasyf/Code/monorepo-recovered on (detached)\nsession 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored\nresuming 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90 with claude in /Users/yasyf/Code/monorepo-recovered\n",
+			wantStderr: "cc-sync: exec /opt/homebrew/bin/claude: no such file or directory\n",
+			wantCalls:  []execCall{{argv: []string{"/opt/homebrew/bin/claude", "--resume", humanSession}, dir: "/Users/yasyf/Code/monorepo-recovered", env: launchEnv}},
+			wantPickup: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &fakeService{pickup: tt.pickup}
+			ex := &fakeExec{err: tt.execErr}
+			got := runOn(svc, ex.terminal(tt.interactive), tt.args...)
+			if got.exit != tt.wantExit || got.stdout != tt.wantStdout || got.stderr != tt.wantStderr {
+				t.Errorf("got exit %d stdout %q stderr %q; want exit %d stdout %q stderr %q", got.exit, got.stdout, got.stderr, tt.wantExit, tt.wantStdout, tt.wantStderr)
+			}
+			if !reflect.DeepEqual(ex.calls, tt.wantCalls) {
+				t.Errorf("exec calls = %#v, want %#v", ex.calls, tt.wantCalls)
+			}
+			if called := svc.got != nil; called != tt.wantPickup {
+				t.Errorf("service called = %t, want %t", called, tt.wantPickup)
 			}
 		})
 	}
@@ -232,12 +380,18 @@ func TestRequests(t *testing.T) {
 		{"inspect default checkpoint", []string{"inspect", "host-mbp:0f3c"}, cli.InspectRequest{Target: cli.SessionRef{Source: "host-mbp", ID: "0f3c"}, Checkpoint: cli.LatestCheckpoint{}}},
 		{"inspect hourly", []string{"inspect", "host-mbp/wt-7f3a", "--checkpoint", "hourly:-3h"}, cli.InspectRequest{Target: cli.ItemRef{SourceHostID: "host-mbp", WorkspaceID: "wt-7f3a"}, Checkpoint: cli.CheckpointHourly{HoursAgo: 3}}},
 		{"sync sessions", []string{"sync", "--session", "0f3c", "--session", "7a1e"}, cli.SyncRequest{Sessions: []string{"0f3c", "7a1e"}}},
-		{"pickup all flags", []string{"pickup", "host-mbp/wt-7f3a", "--checkpoint", "at:2026-09-26T12:00:00-07:00", "--resume", "0f3c", "--resume", "7a1e", "--no-orca", "--dry-run", "--progress", "ndjson"}, cli.PickupRequest{
-			Target:     cli.ItemRef{SourceHostID: "host-mbp", WorkspaceID: "wt-7f3a"},
-			Checkpoint: cli.CheckpointAt{Time: at},
-			Resume:     []string{"0f3c", "7a1e"},
-			NoOrca:     true,
-			DryRun:     true,
+		{"pickup defaults", []string{"pickup", "host-mbp/wt-7f3a"}, cli.PickupRequest{
+			Target:       cli.ItemRef{SourceHostID: "host-mbp", WorkspaceID: "wt-7f3a"},
+			Checkpoint:   cli.LatestCheckpoint{},
+			OnDivergence: cli.DivergenceRefuse,
+		}},
+		{"pickup all flags", []string{"pickup", "host-mbp/wt-7f3a", "--checkpoint", "at:2026-09-26T12:00:00-07:00", "--resume", "0f3c", "--resume", "7a1e", "--on-divergence", "keep-local", "--no-orca", "--dry-run", "--progress", "ndjson"}, cli.PickupRequest{
+			Target:       cli.ItemRef{SourceHostID: "host-mbp", WorkspaceID: "wt-7f3a"},
+			Checkpoint:   cli.CheckpointAt{Time: at},
+			Resume:       []string{"0f3c", "7a1e"},
+			OnDivergence: cli.DivergenceKeepLocal,
+			NoOrca:       true,
+			DryRun:       true,
 		}},
 		{"resume", []string{"resume", "0f3c9a2e"}, cli.ResumeRequest{Session: cli.SessionRef{ID: "0f3c9a2e"}}},
 	}
@@ -249,11 +403,12 @@ func TestRequests(t *testing.T) {
 			}
 			if req, ok := svc.got.(cli.PickupRequest); ok {
 				want := tt.want.(cli.PickupRequest)
-				gotAt, wantAt := req.Checkpoint.(cli.CheckpointAt), want.Checkpoint.(cli.CheckpointAt)
-				if !gotAt.Time.Equal(wantAt.Time) {
-					t.Errorf("checkpoint time = %v, want %v", gotAt.Time, wantAt.Time)
+				if gotAt, ok := req.Checkpoint.(cli.CheckpointAt); ok {
+					if wantAt := want.Checkpoint.(cli.CheckpointAt); !gotAt.Time.Equal(wantAt.Time) {
+						t.Errorf("checkpoint time = %v, want %v", gotAt.Time, wantAt.Time)
+					}
+					req.Checkpoint, want.Checkpoint = nil, nil
 				}
-				req.Checkpoint, want.Checkpoint = nil, nil
 				svc.got, tt.want = req, want
 			}
 			if !reflect.DeepEqual(svc.got, tt.want) {
