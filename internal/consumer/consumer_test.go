@@ -482,12 +482,12 @@ func TestReconcilePinsRetainedRoots(t *testing.T) {
 func TestPayloadAtScale(t *testing.T) {
 	const worktrees, checkpoints = 40, 33
 	p := catalog.Payload{Identity: catalog.Identity, Version: catalog.Version, Exporter: "a", AsOf: t0}
-	block := catalog.Origin{Origin: "a", Revision: 99999}
+	block := catalog.Origin{Origin: "a", Revision: uint64(t0.UnixMicro())}
 	for w := range worktrees {
 		wt := tree(fmt.Sprintf("worktree-%02d", w))
 		for i := range checkpoints {
 			cp := point(fmt.Sprintf("root-%02d-%02d", w, i), t0.Add(-time.Duration(i)*time.Hour), 3)
-			cp.ID = catalog.CheckpointID("a", wt.ID, cp.Root)
+			cp.ID, cp.Revision = catalog.CheckpointID("a", wt.ID, cp.Root), block.Revision
 			cp.ExpiresAt = cp.SourceActivityAt.Add(catalog.ExpiryWindow)
 			cp.Classes = []catalog.Class{catalog.ClassHourly, catalog.ClassDaily}
 			if i == 0 {

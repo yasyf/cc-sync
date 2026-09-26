@@ -6,12 +6,13 @@ import (
 )
 
 // Retain classifies cps at now and returns the retained checkpoints newest
-// first. Complete checkpoints alone claim the tiers: the newest is latest,
-// and each is kept as the newest of its UTC hour within HourlyWindow or of
-// its UTC day within DailyWindow. Beside them, the newest mixed and the
-// newest otherwise incomplete checkpoint captured after the last complete
-// one are kept as latest, so neither ever evicts a complete checkpoint. A
-// checkpoint expires at ExpiresAt exactly.
+// first, by capture time and then by recording revision. Complete
+// checkpoints alone claim the tiers: the newest is latest, and each is kept
+// as the newest of its UTC hour within HourlyWindow or of its UTC day within
+// DailyWindow. Beside them, the newest mixed and the newest otherwise
+// incomplete checkpoint captured after the last complete one are kept as
+// latest, so neither ever evicts a complete checkpoint. A checkpoint expires
+// at ExpiresAt exactly.
 func Retain(cps []Checkpoint, now time.Time) []Checkpoint {
 	live := unexpired(cps, now)
 	slices.SortFunc(live, compareCheckpoints)
