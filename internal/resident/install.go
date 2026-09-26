@@ -47,14 +47,19 @@ func Manifest() manifest.Manifest {
 	}
 }
 
-// Install creates the layout and first stamp, registers the manifest through
-// a temp file with `synckitd register`, and converges the helper LaunchAgent
-// with `synckitd install`.
-func Install(ctx context.Context, run Runner, layout config.Layout, self string) (err error) {
+// Ensure creates the layout and the first stamp.
+func Ensure(layout config.Layout, self string) error {
 	if err := layout.Ensure(); err != nil {
 		return err
 	}
-	if err := catalog.NewPublisher(catalog.New(layout.CatalogPath, self, time.Now), layout.StampDir).Ensure(); err != nil {
+	return catalog.NewPublisher(catalog.New(layout.CatalogPath, self, time.Now), layout.StampDir).Ensure()
+}
+
+// Install runs Ensure, registers the manifest through a temp file with
+// `synckitd register`, and converges the helper LaunchAgent with
+// `synckitd install`.
+func Install(ctx context.Context, run Runner, layout config.Layout, self string) (err error) {
+	if err := Ensure(layout, self); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(Manifest(), "", "  ")
