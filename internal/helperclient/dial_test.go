@@ -214,15 +214,24 @@ func TestInstallEndsWithItsContextWhileTheHelperIsBusy(t *testing.T) {
 	}
 	busy.Store(true)
 
+	cancelAfter := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(ctx)
+		time.AfterFunc(50*time.Millisecond, cancel)
+		return ctx, cancel
+	}
+	deadlineAfter := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, 50*time.Millisecond)
+	}
 	tests := []struct {
 		name     string
 		timeout  time.Duration
-		cancel   bool
+		caller   func(context.Context) (context.Context, context.CancelFunc)
 		wantCode cli.Code
 		wantErr  error
 	}{
-		{"deadline", 50 * time.Millisecond, false, cli.CodeUnavailable, context.DeadlineExceeded},
-		{"cancelled", time.Minute, true, cli.CodeCancelled, context.Canceled},
+		{"deadline", 50 * time.Millisecond, context.WithCancel, cli.CodeUnavailable, context.DeadlineExceeded},
+		{"caller deadline", time.Minute, deadlineAfter, cli.CodeUnavailable, context.DeadlineExceeded},
+		{"cancelled", time.Minute, cancelAfter, cli.CodeCancelled, context.Canceled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -231,11 +240,8 @@ func TestInstallEndsWithItsContextWhileTheHelperIsBusy(t *testing.T) {
 				t.Fatalf("Dial: %v", err)
 			}
 			defer func() { _ = helper.Close() }()
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := tt.caller(t.Context())
 			defer cancel()
-			if tt.cancel {
-				time.AfterFunc(50*time.Millisecond, cancel)
-			}
 			svc := service.New(service.Config{Installer: nopInstaller{}, Helper: helper, HelperTimeout: tt.timeout, HelperPoll: time.Millisecond})
 			started := time.Now()
 			_, err = svc.Install(ctx, cli.InstallRequest{})

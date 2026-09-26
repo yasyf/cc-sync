@@ -82,7 +82,8 @@ type Picker interface {
 // live network State; Live and Sessions read the native Claude layout; Exec
 // replaces the process with argv run in dir under env, returning only on
 // failure; Tiers is the effective capture cadence. Install waits up to
-// HelperTimeout, polling every HelperPoll, for the helper it started to answer.
+// HelperTimeout, or until its caller's deadline when that comes first, polling
+// every HelperPoll, for the helper it started to answer.
 type Config struct {
 	Catalog    Catalog
 	Deliveries Deliveries
@@ -149,6 +150,7 @@ func (s *Service) probeHelper(ctx context.Context) (cli.Helper, error) {
 }
 
 func (s *Service) awaitHelper(ctx context.Context) (cli.Helper, error) {
+	started := time.Now()
 	wait, cancel := context.WithTimeout(ctx, s.cfg.HelperTimeout)
 	defer cancel()
 	poll := time.NewTimer(s.cfg.HelperPoll)
@@ -169,10 +171,14 @@ func (s *Service) awaitHelper(ctx context.Context) (cli.Helper, error) {
 			case <-wait.Done():
 			}
 		}
-		if ctx.Err() != nil {
+		waited := s.cfg.HelperTimeout
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
 			return cli.Helper{}, fmt.Errorf("wait for helper: %w", ctx.Err())
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			waited = time.Since(started).Round(time.Millisecond)
 		}
-		return cli.Helper{}, cli.Errorf(cli.CodeUnavailable, "helper installed but not ready after %s; run `cc-sync status` in a few seconds, or `synckitd install` again: %w", s.cfg.HelperTimeout, err)
+		return cli.Helper{}, cli.Errorf(cli.CodeUnavailable, "helper installed but not ready after %s; run `cc-sync status` in a few seconds, or `synckitd install` again: %w", waited, err)
 	}
 }
 

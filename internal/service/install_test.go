@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,26 @@ func TestInstallWaitHonorsCancel(t *testing.T) {
 	}
 	if helper.calls != 1 {
 		t.Errorf("status calls = %d, want 1", helper.calls)
+	}
+}
+
+func TestInstallWaitEndsAtCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	helper := &startingHelper{fakeHelper: fakeHelper{err: transport(daemonkit.ErrNotReady)}}
+	_, err := New(installConfig(installed(), helper, time.Hour)).Install(ctx, cli.InstallRequest{})
+	if code := cli.Classify(err); code != cli.CodeUnavailable {
+		t.Fatalf("Install error %v classified %q, want %q", err, code, cli.CodeUnavailable)
+	}
+	if !errors.Is(err, daemonkit.ErrNotReady) {
+		t.Errorf("Install error %v does not wrap ErrNotReady", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "run `cc-sync status` in a few seconds") || strings.Contains(msg, time.Hour.String()) {
+		t.Errorf("Install error %q, want the recovery step without claiming the 1h wait elapsed", msg)
+	}
+	if helper.calls < 2 {
+		t.Errorf("status calls = %d, want the wait to retry", helper.calls)
 	}
 }
 
