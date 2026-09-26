@@ -56,7 +56,7 @@ func wiring(layout config.Layout, helper *helperclient.Client) service.Config {
 	term := cli.ProcessTerminal()
 	return service.Config{
 		Catalog:    meshCatalog{path: layout.CatalogPath},
-		Deliveries: synckitDeliveries{},
+		Deliveries: synckitDeliveries{status: delivery.Status},
 		Mesh:       hostregistry.Mesh,
 		Network:    currentNetwork,
 		Orca:       localOrca{},
@@ -164,13 +164,18 @@ func captureTiers(path string) (cli.CaptureTiers, error) {
 	}, nil
 }
 
-type synckitDeliveries struct{}
+type synckitDeliveries struct {
+	status func(ctx context.Context, serviceID string) ([]delivery.PeerStatus, error)
+}
 
-func (synckitDeliveries) Status(ctx context.Context, serviceID string) ([]delivery.PeerStatus, error) {
-	statuses, err := delivery.Status(ctx, serviceID)
+func (d synckitDeliveries) Status(ctx context.Context, serviceID string) ([]delivery.PeerStatus, error) {
+	statuses, err := d.status(ctx, serviceID)
 	var transport *rpc.TransportError
-	if errors.As(err, &transport) && transport.Undispatched {
+	switch {
+	case errors.As(err, &transport) && transport.Undispatched:
 		return nil, fmt.Errorf("%w: synckitd is not running: %w", service.ErrUnavailable, err)
+	case errors.Is(err, rpc.ErrUnknownMethod):
+		return nil, fmt.Errorf("%w: %w", service.ErrSynckitdTooOld, err)
 	}
 	return statuses, err
 }
