@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"slices"
 	"time"
 )
@@ -34,6 +35,16 @@ func (t Tier) String() string { return tierNames[t] }
 
 // MarshalText renders the tier by name in JSON status output.
 func (t Tier) MarshalText() ([]byte, error) { return []byte(t.String()), nil }
+
+// UnmarshalText parses a tier name, so status replies decode on the client.
+func (t *Tier) UnmarshalText(text []byte) error {
+	i := slices.Index(tierNames[:], string(text))
+	if i < 0 {
+		return fmt.Errorf("scheduler: unknown tier %q", text)
+	}
+	*t = Tier(i)
+	return nil
+}
 
 // Classify maps a unit's latest activity to its tier and capture interval:
 // human input or focus within 15m captures every 2m, autonomous activity

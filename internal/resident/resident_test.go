@@ -1,0 +1,186 @@
+package resident
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/yasyf/cc-sync/internal/catalog"
+	"github.com/yasyf/cc-sync/internal/config"
+	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/scheduler"
+	"github.com/yasyf/cc-sync/internal/version"
+	"github.com/yasyf/synckit/netpolicy"
+	"github.com/yasyf/synckit/syncservice"
+)
+
+func TestPrepareWiring(t *testing.T) {
+	h := newHarness(t)
+
+	for _, dir := range []string{h.layout.Dir, h.layout.StampDir, h.layout.CodeStore, h.layout.CodeIndex, h.layout.ReplicaRoot, h.layout.JournalDir} {
+		if !exists(t, dir) {
+			t.Errorf("layout dir %s missing", dir)
+		}
+	}
+	if !exists(t, filepath.Join(h.layout.StampDir, catalog.StampFile)) {
+		t.Errorf("stamp %s missing", catalog.StampFile)
+	}
+	if h.capture.Artifacts != h.store || h.capture.Monitor != h.monitor || h.capture.Code == nil || h.capture.Catalog == nil || h.capture.Publisher == nil {
+		t.Errorf("pipeline capture = %+v, want the prepared store, monitor, code store, catalog, and publisher", h.capture)
+	}
+	if h.capture.Config.Capture != config.DefaultTiers || h.capture.Layout != h.layout {
+		t.Errorf("pipeline config/layout = %+v/%+v, want defaults and the deps layout", h.capture.Config, h.capture.Layout)
+	}
+	caps, err := h.registered.Capabilities(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := syncservice.ArtifactCapabilities(consumer.ServiceID); !reflect.DeepEqual(caps, want) {
+		t.Errorf("registered Capabilities = %+v, want %+v", caps, want)
+	}
+	items, err := h.registered.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != consumer.WatchItemID || !reflect.DeepEqual(items[0].WatchDirs, []string{h.layout.StampDir}) {
+		t.Errorf("registered List = %+v, want the one stamp item", items)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := h.resident.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if _, errText := h.call(t, MethodKick, KickRequest{}); !strings.Contains(errText, scheduler.ErrStopped.Error()) {
+		t.Errorf("kick after Drain error = %q, want %q", errText, scheduler.ErrStopped)
+	}
+	if err := h.resident.Close(ctx); err != nil || !h.store.closed || !h.monitor.closed {
+		t.Errorf("Close = %v, store closed = %v, monitor closed = %v; want nil, true, true", err, h.store.closed, h.monitor.closed)
+	}
+	select {
+	case err := <-h.stops:
+		t.Errorf("stop(%v) called on a clean drain", err)
+	default:
+	}
+}
+
+func TestStatusMethod(t *testing.T) {
+	h := newHarness(t)
+	if _, errText := h.call(t, MethodKick, KickRequest{}); errText != "" {
+		t.Fatalf("kick: %s", errText)
+	}
+	raw, errText := h.call(t, MethodStatus, map[string]any{})
+	if errText != "" {
+		t.Fatalf("status: %s", errText)
+	}
+	var got StatusReply
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := StatusReply{
+		Build:     version.String(),
+		Scheduler: got.Scheduler,
+		Catalog:   CatalogStatus{Self: "me@host", Origins: []OriginStatus{}},
+		Capture:   config.DefaultTiers,
+		Network:   unrestricted,
+		Pins:      []Pin{},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("status = %+v, want %+v", got, want)
+	}
+	units := got.Scheduler.Units
+	if len(units) != 1 || units[0].WorktreeID != "wt1" || units[0].Last == nil || units[0].Last.Checkpoint != "cp-wt1" {
+		t.Errorf("status scheduler units = %+v, want wt1 last captured as cp-wt1", units)
+	}
+}
+
+func TestKickMethod(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     KickRequest
+		want    []string
+		wantErr string
+	}{
+		{name: "named session", req: KickRequest{SessionIDs: []string{"s1"}}, want: []string{"wt1:captured:cp-wt1"}},
+		{name: "every unit", req: KickRequest{}, want: []string{"wt1:captured:cp-wt1"}},
+		{name: "unknown session", req: KickRequest{SessionIDs: []string{"nope"}}, wantErr: scheduler.ErrUnknownSession.Error()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			raw, errText := h.call(t, MethodKick, tt.req)
+			if tt.wantErr != "" {
+				if !strings.Contains(errText, tt.wantErr) {
+					t.Fatalf("kick error = %q, want %q", errText, tt.wantErr)
+				}
+				return
+			}
+			if errText != "" {
+				t.Fatalf("kick: %s", errText)
+			}
+			var reply KickReply
+			if err := json.Unmarshal(raw, &reply); err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, a := range reply.Attempts {
+				got = append(got, a.WorktreeID+":"+string(a.Outcome)+":"+a.Checkpoint)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("kick attempts = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKickRejectsUnknownParams(t *testing.T) {
+	h := newHarness(t)
+	if _, errText := h.call(t, MethodKick, map[string]any{"sessions": []string{"s1"}}); !strings.Contains(errText, "unknown field") {
+		t.Errorf("kick error = %q, want an unknown field refusal", errText)
+	}
+}
+
+func TestVerifyLoop(t *testing.T) {
+	monitor := newFakeMonitor(netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true})
+	nudges := make(chan struct{}, 1)
+	calls := make(chan struct{}, 8)
+	var failures atomic.Int32
+	failures.Store(1)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- verifyLoop(ctx, monitor, time.Hour, nudges, func(context.Context) error {
+			calls <- struct{}{}
+			if failures.Add(-1) >= 0 {
+				return errors.New("fetch failed")
+			}
+			return nil
+		})
+	}()
+
+	nudges <- struct{}{}
+	select {
+	case <-calls:
+		t.Fatal("verify ran while the network was metered")
+	case <-time.After(50 * time.Millisecond):
+	}
+	monitor.set(unrestricted)
+	for range 2 {
+		select {
+		case <-calls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("verify did not run after the network became unrestricted")
+		}
+		nudges <- struct{}{}
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("verifyLoop = %v, want context.Canceled", err)
+	}
+}

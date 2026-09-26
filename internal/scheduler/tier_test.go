@@ -72,3 +72,20 @@ func TestUnitClassify(t *testing.T) {
 		})
 	}
 }
+
+func TestTierTextRoundTrip(t *testing.T) {
+	for _, tier := range []Tier{TierHuman, TierAutonomous, TierRecent, TierIdle} {
+		text, err := tier.MarshalText()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got Tier
+		if err := got.UnmarshalText(text); err != nil || got != tier {
+			t.Errorf("UnmarshalText(%q) = %v, %v; want %v", text, got, err, tier)
+		}
+	}
+	var got Tier
+	if err := got.UnmarshalText([]byte("urgent")); err == nil {
+		t.Errorf("UnmarshalText(urgent) = %v, want an error", got)
+	}
+}
