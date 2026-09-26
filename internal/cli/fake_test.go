@@ -140,11 +140,12 @@ func fullItem() cli.Item {
 		},
 		CheckpointCount: 3,
 		Completeness: cli.Completeness{
-			Ready:      true,
-			Missing:    []string{},
-			Transcript: cli.TranscriptComplete,
-			Code:       cli.CodeComplete,
-			Layout:     cli.LayoutClientView,
+			Ready:          true,
+			Missing:        []string{},
+			Transcript:     cli.TranscriptComplete,
+			Code:           cli.CodeComplete,
+			CodeCapturedAt: ptr(cli.At(time.Date(2026, 9, 26, 12, 0, 0, 500_000_000, pdt))),
+			Layout:         cli.LayoutClientView,
 		},
 		LocalCheckout: &cli.LocalCheckout{Path: "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200", Reusable: true},
 	}
@@ -167,6 +168,29 @@ func sparseItem() cli.Item {
 			Layout:     cli.LayoutNone,
 		},
 		Pause: &cli.Pause{Reason: cli.PauseCellular, Endpoint: cli.EndpointPeer, Since: ts(11, 0)},
+	}
+}
+
+func deferredItem() cli.Item {
+	return cli.Item{
+		Source:    cli.Source{Host: cli.Host{HostID: "host-mbp", HostName: "mbp"}, LastSeenAt: tsp(12, 5), Reachable: true},
+		Workspace: cli.Workspace{ID: "wt-9c1d", RepoName: "assets", Branch: ptr("main"), SourcePath: "/Users/yasyf/Code/assets"},
+		Sessions: []cli.Session{{
+			SessionID:           "3b8d1f6a-2e4c-4a9b-8d7e-6f5a4b3c2d1e",
+			Title:               "Retarget textures",
+			LastActivityAt:      tsp(12, 2),
+			LastHumanActivityAt: tsp(12, 2),
+			Activity:            cli.ActivityHuman,
+		}},
+		Checkpoint:      cli.Checkpoint{ID: "5eed4a11", Tier: cli.TierLatest, CapturedAt: ts(12, 5), SourceActivityAt: tsp(12, 2)},
+		CheckpointCount: 2,
+		Completeness: cli.Completeness{
+			Ready:          true,
+			Transcript:     cli.TranscriptComplete,
+			Code:           cli.CodeDeferred,
+			CodeCapturedAt: tsp(10, 30),
+			Layout:         cli.LayoutHostOnly,
+		},
 	}
 }
 

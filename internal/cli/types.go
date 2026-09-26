@@ -296,13 +296,17 @@ type Checkpoint struct {
 }
 
 // Completeness is a checkpoint's local readiness; Ready is never true while
-// anything required is missing, deferred, partial, or omitted.
+// anything required is missing, partial, or omitted. Deferred code carries the
+// most recent complete code snapshot, captured at CodeCapturedAt, which may be
+// older than the checkpoint's sessions; CodeCapturedAt is nil when the
+// checkpoint carries no code snapshot.
 type Completeness struct {
-	Ready      bool            `json:"ready"`
-	Missing    Array[string]   `json:"missing"`
-	Transcript TranscriptState `json:"transcript"`
-	Code       CodeState       `json:"code"`
-	Layout     LayoutState     `json:"layout"`
+	Ready          bool            `json:"ready"`
+	Missing        Array[string]   `json:"missing"`
+	Transcript     TranscriptState `json:"transcript"`
+	Code           CodeState       `json:"code"`
+	CodeCapturedAt *Time           `json:"code_captured_at"`
+	Layout         LayoutState     `json:"layout"`
 }
 
 // LocalCheckout is an existing local checkout pickup could reuse.

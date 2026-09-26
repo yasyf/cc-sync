@@ -60,7 +60,7 @@ func TestJSONGolden(t *testing.T) {
 		{"list_full", &fakeService{list: cli.ListResult{
 			GeneratedAt: ts(12, 10),
 			Local:       cli.Host{HostID: "host-air", HostName: "air"},
-			Items:       []cli.Item{fullItem(), sparseItem()},
+			Items:       []cli.Item{fullItem(), deferredItem(), sparseItem()},
 		}}, []string{"list", "--json"}},
 		{"list_empty", &fakeService{list: cli.ListResult{GeneratedAt: ts(12, 10), Local: cli.Host{HostID: "host-air", HostName: "air"}}}, []string{"--json", "list"}},
 		{"inspect", &fakeService{inspect: fullInspect()}, []string{"inspect", "host-mbp/wt-7f3a", "--json"}},
@@ -94,9 +94,10 @@ func TestHumanGolden(t *testing.T) {
 		args []string
 	}{
 		{"status", &fakeService{status: fullStatus()}, []string{"status"}},
-		{"list", &fakeService{list: cli.ListResult{Items: []cli.Item{fullItem(), sparseItem()}}}, []string{"list"}},
+		{"list", &fakeService{list: cli.ListResult{Items: []cli.Item{fullItem(), deferredItem(), sparseItem()}}}, []string{"list"}},
 		{"list_empty", &fakeService{}, []string{"list"}},
 		{"inspect", &fakeService{inspect: fullInspect()}, []string{"inspect", "host-mbp/wt-7f3a"}},
+		{"inspect_deferred", &fakeService{inspect: cli.InspectResult{Item: deferredItem()}}, []string{"inspect", "host-mbp/wt-9c1d"}},
 		{"pickup_cli_only", &fakeService{pickup: cliOnlyPickup()}, []string{"pickup", "0f3c"}},
 		{"pickup_orca", &fakeService{pickup: orcaPickup()}, []string{"pickup", "0f3c"}},
 	}

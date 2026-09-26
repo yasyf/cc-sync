@@ -59,6 +59,7 @@
         "missing": [],
         "transcript": "complete",
         "code": "complete",
+        "code_captured_at": "2026-09-26T19:00:00.5Z",
         "layout": "client-view"
       },
       "pause": null,
@@ -66,6 +67,51 @@
         "path": "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200",
         "reusable": true
       }
+    },
+    {
+      "selector": "host-mbp/wt-9c1d",
+      "source": {
+        "host_id": "host-mbp",
+        "host_name": "mbp",
+        "last_seen_at": "2026-09-26T19:05:00Z",
+        "reachable": true
+      },
+      "workspace": {
+        "id": "wt-9c1d",
+        "repo_name": "assets",
+        "repo_origin": null,
+        "branch": "main",
+        "source_path": "/Users/yasyf/Code/assets",
+        "orca": null
+      },
+      "sessions": [
+        {
+          "session_id": "3b8d1f6a-2e4c-4a9b-8d7e-6f5a4b3c2d1e",
+          "title": "Retarget textures",
+          "last_activity_at": "2026-09-26T19:02:00Z",
+          "last_human_activity_at": "2026-09-26T19:02:00Z",
+          "activity": "human",
+          "bound_in_orca": false,
+          "live_local_collision": false
+        }
+      ],
+      "checkpoint": {
+        "id": "5eed4a11",
+        "tier": "latest",
+        "captured_at": "2026-09-26T19:05:00Z",
+        "source_activity_at": "2026-09-26T19:02:00Z"
+      },
+      "checkpoint_count": 2,
+      "completeness": {
+        "ready": true,
+        "missing": [],
+        "transcript": "complete",
+        "code": "deferred",
+        "code_captured_at": "2026-09-26T17:30:00Z",
+        "layout": "host-only"
+      },
+      "pause": null,
+      "local_checkout": null
     },
     {
       "selector": "host-mini/wt-01",
@@ -99,6 +145,7 @@
         ],
         "transcript": "partial",
         "code": "missing",
+        "code_captured_at": null,
         "layout": "none"
       },
       "pause": {

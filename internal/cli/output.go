@@ -138,6 +138,13 @@ func joinOrDash(values []string) string {
 	return strings.Join(values, ", ")
 }
 
+func formatCode(c Completeness) string {
+	if c.CodeCapturedAt == nil {
+		return string(c.Code)
+	}
+	return fmt.Sprintf("%s from %s", c.Code, formatTime(*c.CodeCapturedAt))
+}
+
 func formatReadiness(c Completeness) string {
 	if c.Ready {
 		return "ready"
@@ -210,7 +217,7 @@ func renderList(p *printer, res ListResult) {
 		return
 	}
 	rows := make([][]string, 0, 1+len(res.Items))
-	rows = append(rows, []string{"SELECTOR", "SOURCE", "REPO", "BRANCH", "SESSIONS", "CAPTURED", "STATE"})
+	rows = append(rows, []string{"SELECTOR", "SOURCE", "REPO", "BRANCH", "SESSIONS", "CAPTURED", "CODE", "STATE"})
 	for _, item := range res.Items {
 		state := formatReadiness(item.Completeness)
 		if item.Pause != nil {
@@ -218,7 +225,7 @@ func renderList(p *printer, res ListResult) {
 		}
 		rows = append(rows, []string{
 			item.Ref().String(), item.Source.HostName, item.Workspace.RepoName, formatOptional(item.Workspace.Branch, "(detached)"),
-			strconv.Itoa(len(item.Sessions)), formatTime(item.Checkpoint.CapturedAt), state,
+			strconv.Itoa(len(item.Sessions)), formatTime(item.Checkpoint.CapturedAt), formatCode(item.Completeness), state,
 		})
 	}
 	p.table(rows)
@@ -228,6 +235,7 @@ func renderInspect(p *printer, res InspectResult) {
 	p.printf("%s: %s on %s (%s)\n", res.Ref(), res.Workspace.RepoName, formatOptional(res.Workspace.Branch, "(detached)"), res.Workspace.SourcePath)
 	p.printf("source: %s (%s)\n", res.Source.HostName, res.Source.HostID)
 	p.printf("checkpoint: %s (%s) captured %s, %s\n", res.Checkpoint.ID, res.Checkpoint.Tier, formatTime(res.Checkpoint.CapturedAt), formatReadiness(res.Completeness))
+	p.printf("code: %s\n", formatCode(res.Completeness))
 	for _, s := range res.Sessions {
 		p.printf("session %s: %s [%s]\n", s.SessionID, s.Title, s.Activity)
 	}
