@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/claudenative"
 	"github.com/yasyf/cc-sync/internal/cli"
+	"github.com/yasyf/cc-sync/internal/config"
 	applog "github.com/yasyf/cc-sync/internal/log"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/scheduler"
@@ -23,47 +23,48 @@ import (
 
 const networkSettle = time.Second
 
-var ccsync = hostregistry.Config{Name: "cc-sync", DirEnv: "CC_SYNC_CONFIG_DIR"}
-
 func main() {
 	applog.Setup()
-	os.Exit(cli.Execute(service.New(wiring()), os.Args[1:], os.Stdout, os.Stderr))
+	layout, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cc-sync:", err)
+		os.Exit(1)
+	}
+	os.Exit(cli.Execute(service.New(wiring(layout)), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func wiring() service.Config {
+func wiring(layout config.Layout) service.Config {
 	term := cli.ProcessTerminal()
 	return service.Config{
-		Catalog:    meshCatalog{},
+		Catalog:    meshCatalog{path: layout.CatalogPath},
 		Deliveries: unwiredDeliveries{},
 		Mesh:       hostregistry.Mesh,
 		Network:    currentNetwork,
 		Orca:       localOrca{},
 		Live:       liveSessions,
 		Sessions:   localSessions,
-		Checkouts:  homeCheckouts{},
+		Checkouts:  service.CheckoutDir{Root: layout.CheckoutRoot},
 		Helper:     unwiredHelper{},
 		Installer:  unwiredInstaller{},
 		Picker:     unwiredPicker{},
 		Serve:      func(context.Context) error { return unwired("the resident helper (internal/resident)") },
-		Tiers:      defaultTiers,
+		Tiers:      func() (cli.CaptureTiers, error) { return captureTiers(layout.ConfigPath) },
 		Environ:    term.Environ,
 		Exec:       term.Exec,
 		Now:        time.Now,
 	}
 }
 
-type meshCatalog struct{}
+type meshCatalog struct {
+	path string
+}
 
-func (meshCatalog) Load() (catalog.Snapshot, error) {
+func (c meshCatalog) Load() (catalog.Snapshot, error) {
 	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return catalog.Snapshot{}, fmt.Errorf("load mesh: %w", err)
 	}
-	dir, err := ccsync.Dir()
-	if err != nil {
-		return catalog.Snapshot{}, fmt.Errorf("resolve config dir: %w", err)
-	}
-	return catalog.New(filepath.Join(dir, "catalog-v1.json"), reg.Self, time.Now).Load()
+	return catalog.New(c.path, reg.Self, time.Now).Load()
 }
 
 func currentNetwork(ctx context.Context) (st netpolicy.State, err error) {
@@ -127,25 +128,20 @@ func localSessions(ctx context.Context, id claudenative.SessionID) ([]claudenati
 	return sessions, err
 }
 
-type homeCheckouts struct{}
-
-func (homeCheckouts) Find(source string, w catalog.Worktree) (*cli.LocalCheckout, error) {
-	home, err := os.UserHomeDir()
+func captureTiers(path string) (cli.CaptureTiers, error) {
+	cfg, err := config.Load(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve home dir: %w", err)
+		return cli.CaptureTiers{}, err
 	}
-	return service.CheckoutDir{Root: filepath.Join(home, ".cc-sync", "checkouts")}.Find(source, w)
-}
-
-func defaultTiers() (cli.CaptureTiers, error) {
+	t := cfg.Capture
 	return cli.CaptureTiers{
-		HumanInterval:      cli.Duration(2 * time.Minute),
-		AutonomousInterval: cli.Duration(5 * time.Minute),
-		RecentInterval:     cli.Duration(15 * time.Minute),
-		IdleInterval:       cli.Duration(time.Hour),
-		HumanWindow:        cli.Duration(15 * time.Minute),
-		AutonomousWindow:   cli.Duration(15 * time.Minute),
-		RecentWindow:       cli.Duration(time.Hour),
+		HumanInterval:      cli.Duration(t.HumanInterval),
+		AutonomousInterval: cli.Duration(t.AutonomousInterval),
+		RecentInterval:     cli.Duration(t.RecentInterval),
+		IdleInterval:       cli.Duration(t.IdleInterval),
+		HumanWindow:        cli.Duration(t.HumanWindow),
+		AutonomousWindow:   cli.Duration(t.AutonomousWindow),
+		RecentWindow:       cli.Duration(t.RecentWindow),
 	}, nil
 }
 
