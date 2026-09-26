@@ -233,6 +233,38 @@ func TestResolveBinary(t *testing.T) {
 	}
 }
 
+func TestNewPrefersBinaryEnv(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "orca")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // G306: an executable test stub must be +x.
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		env      string
+		explicit string
+		want     string
+		wantErr  bool
+	}{
+		{"env names the binary", stub, "", stub, false},
+		{"explicit beats env", filepath.Join(dir, "absent"), stub, stub, false},
+		{"env missing", filepath.Join(dir, "absent"), "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(BinaryEnv, tt.env)
+			c, err := New(Options{Binary: tt.explicit})
+			if tt.wantErr {
+				wantUnavailable(t, err, ReasonNotInstalled)
+				return
+			}
+			if err != nil || c.binary != tt.want {
+				t.Fatalf("New() binary = %v, %v; want %q", c, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatusParsesObservedShape(t *testing.T) {
 	f := newFakeOrca(t)
 	golden, err := os.ReadFile("testdata/status-local.golden.json")
