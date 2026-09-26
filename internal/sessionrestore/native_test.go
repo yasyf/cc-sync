@@ -49,10 +49,11 @@ type harness struct {
 }
 
 type runResult struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Result    string `json:"result"`
-	IsError   bool   `json:"is_error"`
+	Type      string  `json:"type"`
+	SessionID string  `json:"session_id"`
+	Result    string  `json:"result"`
+	IsError   bool    `json:"is_error"`
+	Cost      float64 `json:"total_cost_usd"`
 }
 
 func newHarness(t *testing.T) *harness {
@@ -149,6 +150,7 @@ func (h *harness) run(t *testing.T, dir, prompt string, flags ...string) (runRes
 	}
 	for _, m := range msgs {
 		if m.Type == "result" {
+			spend.add(m.Cost)
 			return m, stderr.String(), nil
 		}
 	}
