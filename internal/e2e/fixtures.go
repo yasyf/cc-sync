@@ -46,6 +46,56 @@ func NewOrigin(t *testing.T, relpath string, files map[string]string) *Origin {
 	return &Origin{URL: bare, Relpath: relpath}
 }
 
+// NewLFSOrigin is NewOrigin with git-lfs tracking every pattern: the bare
+// repository doubles as a file:// LFS remote named by a committed
+// .lfsconfig, and objects committed to the published main are uploaded to
+// it. It isolates the process's global git config so no ambient LFS filter
+// leaks in; clones stay pointer-only until Host.InstallLFS.
+func NewLFSOrigin(t *testing.T, relpath string, files map[string]string, patterns ...string) *Origin {
+	t.Helper()
+	if err := exec.Command("git", "lfs", "version").Run(); err != nil {
+		t.Fatalf("git-lfs is required: %v", err)
+	}
+	root := physical(t, t.TempDir())
+	global := filepath.Join(root, "gitconfig-global")
+	writeFile(t, global, "", 0o600)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	bare := filepath.Join(root, relpath+".git")
+	gitRun(t, "", "init", "-q", "--bare", "--initial-branch=main", bare)
+	seed := filepath.Join(root, "seed")
+	gitRun(t, "", "clone", "-q", bare, seed)
+	gitRun(t, seed, "checkout", "-q", "-b", "main")
+	gitRun(t, seed, "lfs", "install", "--local")
+	var attrs strings.Builder
+	for _, p := range patterns {
+		attrs.WriteString(p + " filter=lfs diff=lfs merge=lfs -text\n")
+	}
+	writeFile(t, filepath.Join(seed, ".gitattributes"), attrs.String(), 0o644)
+	writeFile(t, filepath.Join(seed, ".lfsconfig"), "[lfs]\n\turl = file://"+bare+"\n", 0o644)
+	for name, content := range files {
+		writeFile(t, filepath.Join(seed, name), content, 0o644)
+	}
+	gitRun(t, seed, "add", "-A")
+	gitRun(t, seed, "commit", "-q", "-m", "initial")
+	gitRun(t, seed, "push", "-q", "origin", "main")
+	return &Origin{URL: bare, Relpath: relpath}
+}
+
+// LFSObjectPath is where git-lfs keeps the object with sha256 oid under a
+// git common dir or bare repository.
+func LFSObjectPath(commonDir, oid string) string {
+	return filepath.Join(commonDir, "lfs", "objects", oid[0:2], oid[2:4], oid)
+}
+
+// InstallLFS installs git-lfs into the host's clone of relpath and pulls
+// every published object, so LFS paths hold real bytes and status is clean.
+func (h *Host) InstallLFS(relpath string) {
+	h.t.Helper()
+	clone := h.Checkout(relpath)
+	h.Git(clone, "lfs", "install", "--local")
+	h.Git(clone, "lfs", "pull")
+}
+
 // Git runs git in dir with a fixed identity, failing the test on error,
 // and returns trimmed stdout.
 func (h *Host) Git(dir string, args ...string) string {
@@ -221,6 +271,7 @@ func (s *Session) record(h *Host, kind string, turn Turn) map[string]any {
 	}
 	if kind == "user" {
 		rec["message"] = map[string]any{"role": "user", "content": turn.Text}
+		rec["origin"] = map[string]any{"kind": "human"}
 		rec["permissionMode"] = "default"
 		return rec
 	}
