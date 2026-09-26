@@ -848,6 +848,48 @@ func TestStopBeforeRun(t *testing.T) {
 	})
 }
 
+func TestStopBeforeRunReleasesKicks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, err := New(Config{}, newInventory(unit("wt", "r", Session{ID: "s"})), newStamper(), newCapturer(), &fakePublisher{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		kick := func() <-chan error {
+			errc := make(chan error, 1)
+			go func() {
+				_, err := s.Kick(ctx, "s")
+				errc <- err
+			}()
+			return errc
+		}
+		t0 := time.Now()
+		pending := kick()
+		synctest.Wait()
+		stopWithin(t, s, cancel)
+		after := kick()
+		synctest.Wait()
+		cancel()
+		for _, k := range []struct {
+			name string
+			errc <-chan error
+		}{{"pending", pending}, {"after", after}} {
+			if err := <-k.errc; !errors.Is(err, ErrStopped) {
+				t.Errorf("%s Kick(s) error = %v, want ErrStopped", k.name, err)
+			}
+		}
+		if d := time.Since(t0); d != 0 {
+			t.Errorf("Kicks returned after %v, want at once", d)
+		}
+
+		if err := s.Run(context.Background()); err != nil {
+			t.Errorf("Run() after Stop = %v, want nil", err)
+		}
+		stopWithin(t, s, cancel)
+	})
+}
+
 func TestStopTwice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, err := New(Config{}, newInventory(unit("wt", "r")), newStamper(), newCapturer(), &fakePublisher{})

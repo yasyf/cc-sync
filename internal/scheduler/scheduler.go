@@ -217,12 +217,12 @@ func New(cfg Config, inv Inventory, stamper Stamper, capt Capturer, pub Publishe
 // the captures and flushes a pending publish. It returns nil after Stop,
 // without scanning when Stop came first, and ctx's error after cancellation.
 func (s *Scheduler) Run(ctx context.Context) error {
-	defer close(s.exited)
 	work, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if !s.start(cancel) {
 		return nil
 	}
+	defer close(s.exited)
 	var workers sync.WaitGroup
 	s.rescan(work)
 	nextScan := time.Now().Add(s.cfg.ScanInterval)
@@ -280,11 +280,15 @@ func (s *Scheduler) Kick(ctx context.Context, sessionIDs ...string) ([]Attempt, 
 
 // Stop cancels an inventory scan and in-flight captures at their next safe
 // point and returns once Run has drained and returned. Before Run starts, it
-// returns at once and makes Run return nil. Repeated calls are harmless.
+// returns at once, fails pending and later Kicks with ErrStopped, and makes Run
+// return nil. Repeated calls are harmless.
 func (s *Scheduler) Stop() {
 	s.life.Lock()
-	s.halted = true
 	cancel := s.cancel
+	if cancel == nil && !s.halted {
+		close(s.exited)
+	}
+	s.halted = true
 	s.life.Unlock()
 	if cancel == nil {
 		return
@@ -319,8 +323,11 @@ func (s *Scheduler) Status() Status {
 func (s *Scheduler) start(cancel context.CancelFunc) bool {
 	s.life.Lock()
 	defer s.life.Unlock()
+	if s.halted {
+		return false
+	}
 	s.cancel = cancel
-	return !s.halted
+	return true
 }
 
 func (s *Scheduler) rescan(ctx context.Context) {
