@@ -25,6 +25,15 @@
       "idle": 0
     },
     "workers": 0,
-    "last_round_at": null
+    "last_round_at": null,
+    "tiers": {
+      "human_interval": "0s",
+      "autonomous_interval": "0s",
+      "recent_interval": "0s",
+      "idle_interval": "0s",
+      "human_window": "0s",
+      "autonomous_window": "0s",
+      "recent_window": "0s"
+    }
   }
 }

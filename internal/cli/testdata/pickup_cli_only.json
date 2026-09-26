@@ -9,7 +9,21 @@
   "sessions": [
     {
       "session_id": "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90",
-      "status": "restored"
+      "status": "restored",
+      "selected": true,
+      "launch": {
+        "argv": [
+          "/opt/homebrew/bin/claude",
+          "--resume",
+          "0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90"
+        ],
+        "dir": "/Users/yasyf/Code/monorepo-recovered",
+        "env_unset": [
+          "CLAUDECODE",
+          "CLAUDE_CODE_ENTRYPOINT"
+        ],
+        "env_set": {}
+      }
     }
   ],
   "orca": null

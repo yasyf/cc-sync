@@ -45,14 +45,16 @@ type SyncRequest struct {
 }
 
 // PickupRequest configures `cc-sync pickup`. Resume lists the session ids to
-// resume, empty meaning the default choice; Progress receives every phase.
+// resume, empty meaning the default choice; OnDivergence resolves a divergent
+// local copy of a picked session; Progress receives every phase.
 type PickupRequest struct {
-	Target     Target
-	Checkpoint CheckpointSelector
-	Resume     []string
-	NoOrca     bool
-	DryRun     bool
-	Progress   func(Progress)
+	Target       Target
+	Checkpoint   CheckpointSelector
+	Resume       []string
+	OnDivergence Divergence
+	NoOrca       bool
+	DryRun       bool
+	Progress     func(Progress)
 }
 
 // ResumeRequest selects the session `cc-sync resume` continues.

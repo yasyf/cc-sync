@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,8 +23,9 @@ type header struct {
 var okHeader = header{Version: outputVersion, OK: true}
 
 type failureDetail struct {
-	Code    Code   `json:"code"`
-	Message string `json:"message"`
+	Code    Code         `json:"code"`
+	Message string       `json:"message"`
+	Details ErrorDetails `json:"details,omitempty"`
 }
 
 type failure struct {
@@ -32,10 +34,14 @@ type failure struct {
 }
 
 func newFailure(code Code, err error) failure {
-	return failure{
+	f := failure{
 		header: header{Version: outputVersion, OK: false},
 		Error:  failureDetail{Code: code, Message: err.Error()},
 	}
+	if e, ok := errors.AsType[*Error](err); ok {
+		f.Error.Details = e.Details
+	}
+	return f
 }
 
 type listedItem struct {
@@ -138,6 +144,13 @@ func joinOrDash(values []string) string {
 	return strings.Join(values, ", ")
 }
 
+func formatCode(c Completeness) string {
+	if c.CodeCapturedAt == nil {
+		return string(c.Code)
+	}
+	return fmt.Sprintf("%s from %s", c.Code, formatTime(*c.CodeCapturedAt))
+}
+
 func formatReadiness(c Completeness) string {
 	if c.Ready {
 		return "ready"
@@ -199,6 +212,9 @@ func renderStatus(p *printer, res StatusResult) {
 	q := res.Scheduler.QueuedByTier
 	p.printf("scheduler: %d workers, queued human=%d autonomous=%d recent=%d idle=%d, last round %s\n",
 		res.Scheduler.Workers, q.Human, q.Autonomous, q.Recent, q.Idle, formatOptionalTime(res.Scheduler.LastRoundAt, "never"))
+	t := res.Scheduler.Tiers
+	p.printf("capture tiers: human every %s within %s, autonomous every %s within %s, recent every %s within %s, idle every %s\n",
+		t.HumanInterval, t.HumanWindow, t.AutonomousInterval, t.AutonomousWindow, t.RecentInterval, t.RecentWindow, t.IdleInterval)
 }
 
 func renderList(p *printer, res ListResult) {
@@ -207,7 +223,7 @@ func renderList(p *printer, res ListResult) {
 		return
 	}
 	rows := make([][]string, 0, 1+len(res.Items))
-	rows = append(rows, []string{"SELECTOR", "SOURCE", "REPO", "BRANCH", "SESSIONS", "CAPTURED", "STATE"})
+	rows = append(rows, []string{"SELECTOR", "SOURCE", "REPO", "BRANCH", "SESSIONS", "CAPTURED", "CODE", "STATE"})
 	for _, item := range res.Items {
 		state := formatReadiness(item.Completeness)
 		if item.Pause != nil {
@@ -215,7 +231,7 @@ func renderList(p *printer, res ListResult) {
 		}
 		rows = append(rows, []string{
 			item.Ref().String(), item.Source.HostName, item.Workspace.RepoName, formatOptional(item.Workspace.Branch, "(detached)"),
-			strconv.Itoa(len(item.Sessions)), formatTime(item.Checkpoint.CapturedAt), state,
+			strconv.Itoa(len(item.Sessions)), formatTime(item.Checkpoint.CapturedAt), formatCode(item.Completeness), state,
 		})
 	}
 	p.table(rows)
@@ -225,6 +241,7 @@ func renderInspect(p *printer, res InspectResult) {
 	p.printf("%s: %s on %s (%s)\n", res.Ref(), res.Workspace.RepoName, formatOptional(res.Workspace.Branch, "(detached)"), res.Workspace.SourcePath)
 	p.printf("source: %s (%s)\n", res.Source.HostName, res.Source.HostID)
 	p.printf("checkpoint: %s (%s) captured %s, %s\n", res.Checkpoint.ID, res.Checkpoint.Tier, formatTime(res.Checkpoint.CapturedAt), formatReadiness(res.Completeness))
+	p.printf("code: %s\n", formatCode(res.Completeness))
 	for _, s := range res.Sessions {
 		p.printf("session %s: %s [%s]\n", s.SessionID, s.Title, s.Activity)
 	}
@@ -245,21 +262,30 @@ func renderInspect(p *printer, res InspectResult) {
 	}
 }
 
-func renderPickup(p *printer, res PickupResult) {
+func renderPickup(p *printer, res PickupResult, launching *PickedSession) {
 	verb := "restored"
 	if res.Checkout.Reused {
 		verb = "reused"
 	}
 	p.printf("checkout %s: %s on %s\n", verb, res.Checkout.Path, formatOptional(res.Checkout.Branch, "(detached)"))
 	for _, s := range res.Sessions {
-		p.printf("session %s: %s\n", s.SessionID, s.Status)
+		line := fmt.Sprintf("session %s: %s", s.SessionID, s.Status)
+		if s.Reason != "" {
+			line += " (" + string(s.Reason) + ")"
+		}
+		if s.ForkedFrom != nil {
+			line += ", forked from " + *s.ForkedFrom
+		}
+		p.printf("%s\n", line)
 	}
 	if res.Orca != nil {
 		p.printf("orca worktree %s: %d resumed, %d dormant\n", res.Orca.WorktreeID, len(res.Orca.Resumed), len(res.Orca.Dormant))
-		return
 	}
 	for _, s := range res.Sessions {
-		if s.Status != SessionResumed {
+		switch {
+		case launching != nil && s.SessionID == launching.SessionID:
+			p.printf("resuming %s with claude in %s\n", s.SessionID, s.Launch.Dir)
+		case res.Orca == nil && s.Status == SessionRestored:
 			p.printf("resume with: cc-sync resume %s\n", s.SessionID)
 		}
 	}

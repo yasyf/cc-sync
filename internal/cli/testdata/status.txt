@@ -3,3 +3,4 @@ local: air (host-air), network connected, expensive, cellular
 peer mbp (host-mbp): reachable, last seen 2026-09-26T19:05:00Z, acked revision 41, pending revision 42 since 2026-09-26T19:01:00Z, paused: cellular (local) since 2026-09-26T18:55:00Z
 peer mini (host-mini): unreachable, last seen never
 scheduler: 2 workers, queued human=1 autonomous=2 recent=3 idle=4, last round 2026-09-26T19:06:00Z
+capture tiers: human every 2m0s within 15m0s, autonomous every 5m0s within 15m0s, recent every 15m0s within 1h0m0s, idle every 1h0m0s
