@@ -131,7 +131,8 @@ func (p *Processes) Processes(context.Context) ([]claudenative.Process, error) {
 // canonical Claude layout under Home/.claude with its own scratch TmpRoot,
 // MeshDir the synckit mesh registry, Artifacts the artifact store root,
 // Registry the reposync registry of Clones, and Layout.CheckoutRoot the
-// recovery checkout root.
+// recovery checkout root. Captures instruments the scheduler's attempts
+// across every boot.
 type Host struct {
 	Name      string
 	Root      string
@@ -146,6 +147,7 @@ type Host struct {
 	Net       *Network
 	Procs     *Processes
 	Orca      *FakeOrca
+	Captures  *CaptureLog
 
 	t       *testing.T
 	peers   []string
@@ -177,6 +179,7 @@ func NewHost(t *testing.T, name string, clock *Clock, origins ...*Origin) *Host 
 		Clock:     clock,
 		Net:       NewNetwork(Unmetered),
 		Procs:     &Processes{},
+		Captures:  newCaptureLog(),
 		t:         t,
 	}
 	for _, dir := range []string{h.Claude.ConfigDir, h.Claude.TmpRoot, h.MeshDir, h.Registry.DefaultLocation, h.Layout.CheckoutRoot} {
@@ -260,7 +263,12 @@ func (h *Host) pipeline(c resident.Capture[*artifact.Store]) (resident.Pipeline,
 	verifier := codeVerifier{code: c.Code, reg: h.Registry, open: func() (codesnap.Reader, func() error, error) {
 		return c.Artifacts, func() error { return nil }, nil
 	}}
-	return resident.Pipeline{Inventory: inv, Stamper: job, Capturer: job, Verifier: verifier}, nil
+	return resident.Pipeline{
+		Inventory: inv,
+		Stamper:   loggedStamper{log: h.Captures, next: job},
+		Capturer:  loggedCapturer{log: h.Captures, next: job},
+		Verifier:  verifier,
+	}, nil
 }
 
 func (h *Host) worktrees(ctx context.Context) ([]worktree.Worktree, error) {
