@@ -14,7 +14,6 @@ import (
 	"github.com/yasyf/reposync/worktree"
 
 	"github.com/yasyf/cc-sync/internal/catalog"
-	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/delivery"
@@ -418,15 +417,12 @@ func TestScaleCoalescedDeliveryAndRedeliveryDedup(t *testing.T) {
 		}
 	}
 
-	lanes := mesh.Lanes(maxWait, time.Second)
+	lanes := mesh.Lanes(LanesConfig{MaxWait: maxWait, Retry: time.Second})
 	settle := func() map[string]delivery.PeerStatus {
 		t.Helper()
 		out := map[string]delivery.PeerStatus{}
 		for _, p := range peers {
-			st, err := lanes.WaitIdle(t.Context(), "host-a", consumer.ServiceID, p.Name)
-			if err != nil {
-				t.Fatal(err)
-			}
+			st := lanes.WaitIdle("host-a", p.Name)
 			if st.State != delivery.StateIdle || st.Pending != nil || st.LastError != "" {
 				t.Fatalf("lane host-a→%s = %+v, want idle and acknowledged", p.Name, st)
 			}
@@ -469,9 +465,7 @@ func TestScaleCoalescedDeliveryAndRedeliveryDedup(t *testing.T) {
 		if i == 0 {
 			firstKick = time.Now()
 		}
-		if err := lanes.Kick(consumer.ServiceID, "host-a", ""); err != nil {
-			t.Fatal(err)
-		}
+		lanes.Kick("host-a", "")
 	}
 	if spread := time.Since(firstKick); spread >= maxWait-time.Second {
 		t.Fatalf("8 kicks spread over %s, too long to fall in one %s window", spread, maxWait)
@@ -514,9 +508,7 @@ func TestScaleCoalescedDeliveryAndRedeliveryDedup(t *testing.T) {
 		before[m] = calls(m)
 	}
 	redeliver := time.Now()
-	if err := lanes.Kick(consumer.ServiceID, "host-a", ""); err != nil {
-		t.Fatal(err)
-	}
+	lanes.Kick("host-a", "")
 	idle := settle()
 	for _, p := range peers {
 		if at := idle[p.Name].LastAttemptAt; at.Before(redeliver.Add(maxWait)) {
