@@ -29,18 +29,10 @@ type Result struct {
 	Displaced []string `json:"displaced,omitempty"`
 }
 
-type moveKind string
-
-const (
-	moveDisplace moveKind = "displace"
-	moveInstall  moveKind = "install"
-)
-
 type move struct {
-	Kind   moveKind `json:"kind"`
-	From   string   `json:"from"`
-	To     string   `json:"to"`
-	Backup string   `json:"backup,omitempty"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Backup string `json:"backup,omitempty"`
 }
 
 type journal struct {
@@ -54,15 +46,25 @@ type journal struct {
 
 // Apply installs p: it stages every unit, journals the moves, displaces
 // divergent local copies, swaps sidecars into place, and renames the
-// transcript last. Any failure rolls every move back.
+// transcript last. Any failure rolls every move back; a rollback that itself
+// fails keeps its staging dir and journal for Recover.
 func Apply(ctx context.Context, p Plan) (Result, error) {
 	return applier{rename: os.Rename}.apply(ctx, p, true)
 }
 
 // Recover finishes every journal a crashed Apply left under the layout's
 // staging dir: committed installs are cleaned up, the rest rolled back.
-// Call it only while no Apply runs against the layout.
+// Rollback is restartable, and a journal whose rollback fails stays for the
+// next Recover. Call it only while no Apply runs against the layout.
 func Recover(ctx context.Context, l claudenative.Layout) error {
+	return applier{rename: os.Rename}.recover(ctx, l)
+}
+
+type applier struct {
+	rename func(from, to string) error
+}
+
+func (a applier) recover(ctx context.Context, l claudenative.Layout) error {
 	root := filepath.Join(l.ConfigDir, stagingDirName)
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -87,15 +89,12 @@ func Recover(ctx context.Context, l claudenative.Layout) error {
 			continue
 		}
 		if !j.Committed {
-			errs = append(errs, j.rollback(os.Rename))
+			errs = append(errs, j.abort(a.rename))
+			continue
 		}
 		errs = append(errs, j.cleanup())
 	}
 	return errors.Join(errs...)
-}
-
-type applier struct {
-	rename func(from, to string) error
 }
 
 func (a applier) apply(ctx context.Context, p Plan, rollback bool) (Result, error) {
@@ -126,13 +125,13 @@ func (a applier) apply(ctx context.Context, p Plan, rollback bool) (Result, erro
 	}
 	res, err := a.stage(ctx, p, j, stage, scratchStage)
 	if err != nil {
-		return Result{}, errors.Join(err, j.rollback(os.Rename), j.cleanup())
+		return Result{}, errors.Join(err, j.abort(a.rename))
 	}
 	if err := a.commit(j); err != nil {
 		if !rollback {
 			return Result{}, err
 		}
-		return Result{}, errors.Join(err, j.rollback(os.Rename), j.cleanup())
+		return Result{}, errors.Join(err, j.abort(a.rename))
 	}
 	return res, j.cleanup()
 }
@@ -140,7 +139,7 @@ func (a applier) apply(ctx context.Context, p Plan, rollback bool) (Result, erro
 func (a applier) stage(ctx context.Context, p Plan, j *journal, stage, scratchStage string) (Result, error) {
 	var res Result
 	for _, d := range p.Displace {
-		j.Moves = append(j.Moves, move{Kind: moveDisplace, From: d.From, To: d.To})
+		j.Moves = append(j.Moves, move{From: d.From, To: d.To})
 		res.Displaced = append(res.Displaced, d.To)
 	}
 	stats := relocation{}
@@ -165,7 +164,7 @@ func (a applier) stage(ctx context.Context, p Plan, j *journal, stage, scratchSt
 		if u.Kind == UnitScratchpad {
 			root = scratchStage
 		}
-		m := move{Kind: moveInstall, From: filepath.Join(root, "new", strconv.Itoa(i)), To: u.Dest}
+		m := move{From: filepath.Join(root, "new", strconv.Itoa(i)), To: u.Dest}
 		if exists && !displaced {
 			m.Backup = filepath.Join(root, "old", strconv.Itoa(i))
 		}
@@ -209,46 +208,50 @@ func (a applier) commit(j *journal) error {
 	return j.write()
 }
 
+func (j *journal) abort(rename func(from, to string) error) error {
+	if err := j.rollback(rename); err != nil {
+		return fmt.Errorf("roll back %s, staging kept for Recover: %w", filepath.Dir(j.path), err)
+	}
+	return j.cleanup()
+}
+
 func (j *journal) rollback(rename func(from, to string) error) error {
 	var errs []error
 	for i := len(j.Moves) - 1; i >= 0; i-- {
-		m := j.Moves[i]
-		fromExists, err := lexists(m.From)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		toExists, err := lexists(m.To)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		switch m.Kind {
-		case moveDisplace:
-			if toExists && !fromExists {
-				errs = append(errs, rename(m.To, m.From))
-			}
-		case moveInstall:
-			if toExists && !fromExists {
-				errs = append(errs, os.RemoveAll(m.To))
-			}
-			if m.Backup == "" {
-				continue
-			}
-			backup, err := lexists(m.Backup)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			if backup {
-				errs = append(errs, rename(m.Backup, m.To))
-			}
-		}
+		errs = append(errs, j.Moves[i].undo(rename))
 	}
 	for i := len(j.Created) - 1; i >= 0; i-- {
 		removeEmpty(j.Created[i])
 	}
 	return errors.Join(errs...)
+}
+
+func (m move) undo(rename func(from, to string) error) error {
+	fromExists, err := lexists(m.From)
+	if err != nil {
+		return err
+	}
+	toExists, err := lexists(m.To)
+	if err != nil {
+		return err
+	}
+	if toExists && !fromExists {
+		if err := rename(m.To, m.From); err != nil {
+			return fmt.Errorf("move %s back to %s: %w", m.To, m.From, err)
+		}
+		toExists = false
+	}
+	if m.Backup == "" || toExists {
+		return nil
+	}
+	backup, err := lexists(m.Backup)
+	if err != nil || !backup {
+		return err
+	}
+	if err := rename(m.Backup, m.To); err != nil {
+		return fmt.Errorf("restore %s: %w", m.To, err)
+	}
+	return nil
 }
 
 func (j *journal) cleanup() error {
