@@ -138,7 +138,7 @@ func (s *Sink) group(ctx context.Context, manifest artifact.Ref, refs []artifact
 		}
 		refs = level
 	}
-	root, err := s.store.PutGroup(ctx, mediaCode, append([]artifact.Ref{manifest}, refs...))
+	root, err := s.store.PutGroup(ctx, MediaCode, append([]artifact.Ref{manifest}, refs...))
 	if err != nil {
 		return artifact.Ref{}, fmt.Errorf("group code root: %w", err)
 	}

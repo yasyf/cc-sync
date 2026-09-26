@@ -30,7 +30,7 @@ func SourceFromManifest(ctx context.Context, store Reader, codeRoot artifact.Ref
 	if err != nil {
 		return nil, fmt.Errorf("read code root %s: %w", codeRoot.Digest, err)
 	}
-	if root.Media != mediaCode || len(root.Deps) == 0 {
+	if root.Media != MediaCode || len(root.Deps) == 0 {
 		return nil, fmt.Errorf("%s is a %q manifest with %d deps, not a code root", codeRoot.Digest, root.Media, len(root.Deps))
 	}
 	rc, err := store.Open(ctx, root.Deps[0])
