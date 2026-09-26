@@ -27,7 +27,7 @@ const (
 	self  = "host-a"
 	sidA  = "11111111-1111-4111-8111-111111111111"
 	sidB  = "22222222-2222-4222-8222-222222222222"
-	wtID  = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	wtID  = "81c9af1e2ba0411997a302a05f02e64b"
 	owner = PinOwnerPrefix + wtID
 )
 
