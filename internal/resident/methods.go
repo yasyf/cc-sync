@@ -116,7 +116,7 @@ func (m methods) status() (StatusReply, error) {
 		for _, wt := range o.Worktrees {
 			for _, cp := range wt.Checkpoints {
 				status.Checkpoints++
-				if snapshot.ReadinessOf(o.Origin, cp.ID).Ready {
+				if snapshot.ReadinessOf(o.Origin, cp).Ready {
 					status.Ready++
 				}
 			}

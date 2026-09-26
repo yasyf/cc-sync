@@ -64,12 +64,18 @@ type Snapshot struct {
 	Readiness map[string]Readiness
 }
 
-// ReadinessOf reports checkpoint id of origin's block on this host.
-func (s Snapshot) ReadinessOf(origin, id string) Readiness {
-	if origin == s.Self {
-		return Readiness{Ready: true}
+// ReadinessOf reports checkpoint cp of origin's block on this host. A mixed
+// checkpoint is never ready: it reports its deferred code beside whatever
+// else is missing.
+func (s Snapshot) ReadinessOf(origin string, cp Checkpoint) Readiness {
+	r := Readiness{Ready: true}
+	if origin != s.Self {
+		r = s.Readiness[cp.ID]
 	}
-	return s.Readiness[id]
+	if cp.Mixed() {
+		r.Ready, r.Deferred = false, cp.Deferred
+	}
+	return r
 }
 
 // Exported is one export: the payload, its canonical bytes, and the source
@@ -392,7 +398,7 @@ func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p 
 					r = Readiness{Missing: []string{MissingCode}}
 				}
 				st.Readiness[cp.ID] = r
-				complete = complete && (r.Ready || !carried[cp.Root.Digest])
+				complete = complete && (r.Ready || cp.Mixed() || !carried[cp.Root.Digest])
 			}
 			st.promote(in.Origin, ev.Roots, now)
 		}
@@ -740,7 +746,7 @@ func (st *state) ready(now time.Time) int {
 	n := 0
 	for _, o := range st.Origins {
 		for _, cp := range live(o, now) {
-			if o.Origin == st.Self || st.Readiness[cp.ID].Ready {
+			if !cp.Mixed() && (o.Origin == st.Self || st.Readiness[cp.ID].Ready) {
 				n++
 			}
 		}

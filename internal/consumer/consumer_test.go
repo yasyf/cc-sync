@@ -282,7 +282,7 @@ func TestApplyArtifactsReadiness(t *testing.T) {
 				t.Fatal(err)
 			}
 			for r, w := range tt.want {
-				if got := snap.ReadinessOf("a", ids[r]); !reflect.DeepEqual(got, w) {
+				if got := snap.ReadinessOf("a", catalog.Checkpoint{ID: ids[r]}); !reflect.DeepEqual(got, w) {
 					t.Errorf("readiness of %s = %+v, want %+v", r, got, w)
 				}
 			}
@@ -441,7 +441,7 @@ func TestVerifyDeferredFetchesOnlyWhenAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := snap.ReadinessOf("a", id), (catalog.Readiness{Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}); !reflect.DeepEqual(got, want) || len(b.verifier.calls) != 1 {
+	if got, want := snap.ReadinessOf("a", catalog.Checkpoint{ID: id}), (catalog.Readiness{Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}); !reflect.DeepEqual(got, want) || len(b.verifier.calls) != 1 {
 		t.Fatalf("paused network: readiness %+v after %d verifications, want %+v after 1", got, len(b.verifier.calls), want)
 	}
 	b.fetch = true
@@ -453,8 +453,8 @@ func TestVerifyDeferredFetchesOnlyWhenAllowed(t *testing.T) {
 	if want := []bool{false, true}; !slices.Equal(b.verifier.fetches, want) || b.publisher.n != published+1 {
 		t.Fatalf("fetch flags %v, publishes %d; want %v and one more publish", b.verifier.fetches, b.publisher.n-published, want)
 	}
-	if snap, err = b.catalog.Load(); err != nil || !snap.ReadinessOf("a", id).Ready {
-		t.Fatalf("readiness after background fetch = %+v, %v; want ready", snap.ReadinessOf("a", id), err)
+	if snap, err = b.catalog.Load(); err != nil || !snap.ReadinessOf("a", catalog.Checkpoint{ID: id}).Ready {
+		t.Fatalf("readiness after background fetch = %+v, %v; want ready", snap.ReadinessOf("a", catalog.Checkpoint{ID: id}), err)
 	}
 	res, err = b.consumer.ApplyArtifacts(t.Context(), change, []artifact.Ref{ref("r1")})
 	if err != nil || res != (syncservice.ApplyResult{AckedRevision: change.SourceRevision}) || len(b.verifier.calls) != 2 {

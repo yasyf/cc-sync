@@ -116,7 +116,8 @@ func (p *Pickup) Run(ctx context.Context, req Request) (res Result, err error) {
 		return Result{}, err
 	}
 	cp := r.pick.checkpoint
-	if ready := snap.ReadinessOf(r.pick.origin, cp.ID); !ready.Ready {
+	ready := snap.ReadinessOf(r.pick.origin, cp)
+	if restorable := ready.Ready || req.AllowPartial && cp.Mixed() && len(ready.Missing) == 0; !restorable {
 		return Result{}, &NotReadyError{CheckpointID: cp.ID, Missing: ready.Missing}
 	}
 	owner := PinOwnerPrefix + rand.Text()

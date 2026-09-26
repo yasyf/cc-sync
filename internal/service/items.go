@@ -189,6 +189,7 @@ func (v view) item(origin string, w catalog.Worktree, cp catalog.Checkpoint) (cl
 		Checkpoint:      *checkpoint(cp),
 		CheckpointCount: len(w.Checkpoints),
 		Completeness:    v.completeness(origin, w, cp),
+		NewerPartial:    newerPartial(w, cp),
 		Pause:           pause,
 	}
 	if origin == v.self {
@@ -262,7 +263,7 @@ func checkpoint(cp catalog.Checkpoint) *cli.Checkpoint {
 }
 
 func (v view) completeness(origin string, w catalog.Worktree, cp catalog.Checkpoint) cli.Completeness {
-	r := v.snap.ReadinessOf(origin, cp.ID)
+	r := v.snap.ReadinessOf(origin, cp)
 	c := cli.Completeness{
 		Ready:          r.Ready && cp.Deferred == "",
 		Missing:        cli.Array[string](slices.Clone(r.Missing)),
@@ -294,7 +295,7 @@ func (v view) completeness(origin string, w catalog.Worktree, cp catalog.Checkpo
 }
 
 func (v view) detail(origin string, cp catalog.Checkpoint) cli.CheckpointDetail {
-	r := v.snap.ReadinessOf(origin, cp.ID)
+	r := v.snap.ReadinessOf(origin, cp)
 	d := cli.CheckpointDetail{
 		ID:         cp.ID,
 		Tier:       cli.Tier(cp.Classes[0]),
@@ -390,9 +391,24 @@ func (v view) locateSession(ref cli.SessionRef) (located, error) {
 	return located{}, cli.Errorf(cli.CodeUsage, "session %s is ambiguous: %s", ref, strings.Join(slices.Sorted(maps.Keys(ids)), ", "))
 }
 
+func newerPartial(w catalog.Worktree, target catalog.Checkpoint) *cli.PartialCheckpoint {
+	for _, cp := range w.Checkpoints {
+		if !cp.Mixed() || !cp.CapturedAt.After(target.CapturedAt) {
+			continue
+		}
+		return &cli.PartialCheckpoint{
+			ID:                cp.ID,
+			CapturedAt:        cli.At(cp.CapturedAt),
+			SessionActivityAt: optionalTime(cp.SourceActivityAt),
+			CodeCapturedAt:    optionalTime(cp.Code.CapturedAt),
+		}
+	}
+	return nil
+}
+
 func latest(w catalog.Worktree) catalog.Checkpoint {
 	for _, cp := range w.Checkpoints {
-		if cp.Deferred == "" {
+		if !cp.Mixed() {
 			return cp
 		}
 	}

@@ -632,3 +632,45 @@ func TestEchoedOwnBlockNeverOverridesOwnState(t *testing.T) {
 		t.Fatalf("echoed revision %d overrode own block: got %+v, want %+v", e.Payload.Origins[0].Revision, got, own)
 	}
 }
+
+func TestRetainKeepsLastCompleteUnderMixed(t *testing.T) {
+	at := func(d time.Duration) time.Time { return t0.Add(-d) }
+	cp := func(id string, age time.Duration, deferred string) Checkpoint {
+		return Checkpoint{ID: id, CapturedAt: at(age), ExpiresAt: t0.Add(24 * time.Hour), Deferred: deferred}
+	}
+	kept := Retain([]Checkpoint{
+		cp("complete", 30*time.Minute, ""),
+		cp("mixed-1", 20*time.Minute, "deferred:rebase"),
+		cp("mixed-2", 10*time.Minute, "deferred:partial-max-new-bytes"),
+	}, t0)
+	got := make([]string, 0, len(kept))
+	for _, k := range kept {
+		got = append(got, k.ID+":"+fmt.Sprint(k.Classes))
+	}
+	want := []string{"mixed-2:[latest]", "complete:[latest hourly daily]"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Retain = %v, want %v", got, want)
+	}
+}
+
+func TestReadinessOfMixed(t *testing.T) {
+	snap := Snapshot{Self: "me", Readiness: map[string]Readiness{"relayed": {Ready: true}, "gap": {Missing: []string{MissingClosure}}}}
+	tests := []struct {
+		name   string
+		origin string
+		cp     Checkpoint
+		want   Readiness
+	}{
+		{"own complete", "me", Checkpoint{ID: "own"}, Readiness{Ready: true}},
+		{"own mixed", "me", Checkpoint{ID: "own", Deferred: "deferred:rebase"}, Readiness{Deferred: "deferred:rebase"}},
+		{"relayed verified mixed", "peer", Checkpoint{ID: "relayed", Deferred: "deferred:missing-lfs"}, Readiness{Deferred: "deferred:missing-lfs"}},
+		{"relayed missing mixed", "peer", Checkpoint{ID: "gap", Deferred: "deferred:rebase"}, Readiness{Missing: []string{MissingClosure}, Deferred: "deferred:rebase"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := snap.ReadinessOf(tt.origin, tt.cp); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ReadinessOf = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}

@@ -547,6 +547,21 @@ func TestDeferredCode(t *testing.T) {
 			t.Fatalf("Run = %+v, %v; want the complete cp-good", res.Checkpoint, err)
 		}
 	})
+	t.Run("default picks the retained complete checkpoint under a newer mixed one", func(t *testing.T) {
+		w := newWorld(t)
+		wt := &w.snap.Origins[0].Worktrees[0]
+		for i := range wt.Checkpoints {
+			wt.Checkpoints[i].Classes, wt.Checkpoints[i].ExpiresAt = nil, now.Add(24*time.Hour)
+		}
+		wt.Checkpoints = catalog.Retain(wt.Checkpoints, now)
+		if len(wt.Checkpoints) != 2 {
+			t.Fatalf("retained %d checkpoints, want the mixed one and the complete one", len(wt.Checkpoints))
+		}
+		res, err := w.run(Request{NoOrca: true})
+		if err != nil || res.Checkpoint != (Checkpoint{ID: "cp-good", CapturedAt: capturedAt}) {
+			t.Fatalf("Run = %+v, %v; want the complete cp-good", res.Checkpoint, err)
+		}
+	})
 	t.Run("explicit mixed without allow-partial", func(t *testing.T) {
 		w := newWorld(t)
 		_, err := w.run(Request{Checkpoint: cli.CheckpointID{Prefix: "cp-mix"}})

@@ -230,6 +230,22 @@ func TestCaptureDeferredKeepsLastCompleteCode(t *testing.T) {
 			if !cp.Code.CapturedAt.Equal(first.Code.CapturedAt) || cp.Code.Digest != first.Code.Digest {
 				t.Fatalf("code summary = %+v, want the last complete %+v", cp.Code, first.Code)
 			}
+			if !cp.Mixed() || first.Mixed() {
+				t.Fatalf("mixed = %t over first %t, want only the new checkpoint mixed", cp.Mixed(), first.Mixed())
+			}
+			snap := catalog.Snapshot{Self: self}
+			if r := snap.ReadinessOf(self, cp); r.Ready || r.Deferred != tt.state {
+				t.Fatalf("mixed readiness = %+v, want not ready, deferred %q", r, tt.state)
+			}
+			if !snap.ReadinessOf(self, first).Ready {
+				t.Fatal("the earlier complete checkpoint is not ready")
+			}
+			mixed, complete := cp, first
+			mixed.ExpiresAt, complete.ExpiresAt = t0.Add(24*time.Hour), t0.Add(24*time.Hour)
+			kept := catalog.Retain([]catalog.Checkpoint{mixed, complete}, t0.Add(time.Minute))
+			if len(kept) != 2 || kept[1].ID != first.ID {
+				t.Fatalf("retained %+v, want the mixed checkpoint and the last complete %s", kept, first.ID)
+			}
 			again := h.capture(t)
 			if again != (scheduler.Result{Outcome: tt.outcome, Checkpoint: cp.ID, Reason: tt.state}) || len(h.catalog.records) != 2 {
 				t.Fatalf("retry = %+v with %d records, want the same deferred checkpoint", again, len(h.catalog.records))

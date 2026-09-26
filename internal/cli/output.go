@@ -151,6 +151,11 @@ func formatCode(c Completeness) string {
 	return fmt.Sprintf("%s from %s", c.Code, formatTime(*c.CodeCapturedAt))
 }
 
+func formatNewerPartial(c *PartialCheckpoint) string {
+	return fmt.Sprintf("newer partial checkpoint (sessions %s, code %s)",
+		formatOptionalTime(c.SessionActivityAt, "none"), formatOptionalTime(c.CodeCapturedAt, "none"))
+}
+
 func formatReadiness(c Completeness) string {
 	if c.Ready {
 		return "ready"
@@ -226,6 +231,9 @@ func renderList(p *printer, res ListResult) {
 	rows = append(rows, []string{"SELECTOR", "SOURCE", "REPO", "BRANCH", "SESSIONS", "CAPTURED", "CODE", "STATE"})
 	for _, item := range res.Items {
 		state := formatReadiness(item.Completeness)
+		if item.NewerPartial != nil {
+			state += "; " + formatNewerPartial(item.NewerPartial)
+		}
 		if item.Pause != nil {
 			state += "; " + formatPause(item.Pause)
 		}
@@ -242,6 +250,9 @@ func renderInspect(p *printer, res InspectResult) {
 	p.printf("source: %s (%s)\n", res.Source.HostName, res.Source.HostID)
 	p.printf("checkpoint: %s (%s) captured %s, %s\n", res.Checkpoint.ID, res.Checkpoint.Tier, formatTime(res.Checkpoint.CapturedAt), formatReadiness(res.Completeness))
 	p.printf("code: %s\n", formatCode(res.Completeness))
+	if res.NewerPartial != nil {
+		p.printf("%s: %s captured %s (pickup --allow-partial)\n", formatNewerPartial(res.NewerPartial), res.NewerPartial.ID, formatTime(res.NewerPartial.CapturedAt))
+	}
 	for _, s := range res.Sessions {
 		p.printf("session %s: %s [%s]\n", s.SessionID, s.Title, s.Activity)
 	}

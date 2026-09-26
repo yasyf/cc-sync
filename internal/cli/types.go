@@ -353,6 +353,17 @@ type Completeness struct {
 	Layout         LayoutState     `json:"layout"`
 }
 
+// PartialCheckpoint is a mixed checkpoint newer than the item's pick-up
+// target: sessions active through SessionActivityAt over the last complete
+// code snapshot, captured at CodeCapturedAt. Only pickup --allow-partial
+// restores it.
+type PartialCheckpoint struct {
+	ID                string `json:"id"`
+	CapturedAt        Time   `json:"captured_at"`
+	SessionActivityAt *Time  `json:"session_activity_at"`
+	CodeCapturedAt    *Time  `json:"code_captured_at"`
+}
+
 // LocalCheckout is an existing local checkout pickup could reuse.
 type LocalCheckout struct {
 	Path     string `json:"path"`
@@ -362,14 +373,15 @@ type LocalCheckout struct {
 // Item is one recoverable worktree and its chosen checkpoint. Its selector is
 // derived from Source.HostID and Workspace.ID when encoded.
 type Item struct {
-	Source          Source         `json:"source"`
-	Workspace       Workspace      `json:"workspace"`
-	Sessions        Array[Session] `json:"sessions"`
-	Checkpoint      Checkpoint     `json:"checkpoint"`
-	CheckpointCount int            `json:"checkpoint_count"`
-	Completeness    Completeness   `json:"completeness"`
-	Pause           *Pause         `json:"pause"`
-	LocalCheckout   *LocalCheckout `json:"local_checkout"`
+	Source          Source             `json:"source"`
+	Workspace       Workspace          `json:"workspace"`
+	Sessions        Array[Session]     `json:"sessions"`
+	Checkpoint      Checkpoint         `json:"checkpoint"`
+	CheckpointCount int                `json:"checkpoint_count"`
+	Completeness    Completeness       `json:"completeness"`
+	NewerPartial    *PartialCheckpoint `json:"newer_partial"`
+	Pause           *Pause             `json:"pause"`
+	LocalCheckout   *LocalCheckout     `json:"local_checkout"`
 }
 
 // Ref is the item's stable selector.

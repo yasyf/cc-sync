@@ -108,6 +108,11 @@ type Checkpoint struct {
 	Completeness     Completeness     `json:"completeness"`
 }
 
+// Mixed reports whether cp pairs newer sessions with deferred, older code. A
+// mixed checkpoint is retained but never ready, never counts toward ACK
+// assurance, and is never the default pick-up target.
+func (cp Checkpoint) Mixed() bool { return cp.Deferred != "" }
+
 // Session summarizes one Claude session archived in a checkpoint.
 type Session struct {
 	ID                string    `json:"id"`

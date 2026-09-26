@@ -62,6 +62,7 @@
         "code_captured_at": "2026-09-26T19:00:00.5Z",
         "layout": "client-view"
       },
+      "newer_partial": null,
       "pause": null,
       "local_checkout": {
         "path": "/Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200",
@@ -110,6 +111,7 @@
         "code_captured_at": "2026-09-26T17:30:00Z",
         "layout": "host-only"
       },
+      "newer_partial": null,
       "pause": null,
       "local_checkout": null
     },
@@ -148,6 +150,7 @@
         "code_captured_at": null,
         "layout": "none"
       },
+      "newer_partial": null,
       "pause": {
         "reason": "cellular",
         "endpoint": "peer",

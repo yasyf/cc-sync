@@ -35,6 +35,7 @@
     "code_captured_at": null,
     "layout": "none"
   },
+  "newer_partial": null,
   "pause": {
     "reason": "cellular",
     "endpoint": "peer",
