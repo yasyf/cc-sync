@@ -50,6 +50,7 @@ type record struct {
 	Slug          string          `json:"slug"`
 	IsMeta        bool            `json:"isMeta"`
 	Origin        *origin         `json:"origin"`
+	PromptSource  string          `json:"promptSource"`
 	ToolUseResult json.RawMessage `json:"toolUseResult"`
 	Operation     string          `json:"operation"`
 	RelocatedCwd  string          `json:"relocatedCwd"`
@@ -79,13 +80,16 @@ var teamNameKey = []byte(`"team_name"`)
 // the agent did or input nobody typed: assistant records, user records
 // carrying a tool result, user records and queued_command attachments whose
 // origin.kind is "task-notification" or "peer" or whose commandMode is
-// "task-notification", and scheduled_task_fire system records. Everything
+// "task-notification", user records without an origin whose promptSource is
+// "sdk" (a headless -p or SDK prompt: an automation entry point, not a
+// person), and scheduled_task_fire system records. Everything
 // else is none: queue-operation records (a queued input counts where its
 // user record or queued_command attachment delivers it, and history.jsonl
 // logs a human's submission time), every other attachment and system
 // subtype (prompt_snapshot, environment, hook results, reminders,
 // compact_boundary, turn_duration, stop_hook_summary, local_command, and the
-// like), user records without an origin, and tail metadata.
+// like), other user records without an origin, isMeta injections, and tail
+// metadata.
 func ClassifyRecord(line []byte) (Activity, time.Time, error) {
 	r, ts, err := decodeRecord(line)
 	if err != nil {
@@ -115,6 +119,9 @@ func (r *record) activity() Activity {
 		return ActivityAutonomous
 	case "user":
 		if len(r.ToolUseResult) > 0 && !bytes.Equal(r.ToolUseResult, []byte("null")) {
+			return ActivityAutonomous
+		}
+		if r.Origin == nil && r.PromptSource == "sdk" && !r.IsMeta {
 			return ActivityAutonomous
 		}
 		return originActivity(r.Origin, r.IsMeta)

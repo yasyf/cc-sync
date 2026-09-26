@@ -21,6 +21,36 @@ func TestClassifyRecord(t *testing.T) {
 			wantAt: at,
 		},
 		{
+			name:   "sdk prompt without origin",
+			line:   `{"type":"user","promptId":"p1","permissionMode":"default","promptSource":"sdk","turnOrigin":"sdk","message":{"role":"user","content":"run it"},"timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityAutonomous,
+			wantAt: at,
+		},
+		{
+			name:   "sdk meta injection",
+			line:   `{"type":"user","promptSource":"sdk","isMeta":true,"timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityNone,
+			wantAt: at,
+		},
+		{
+			name:   "typed prompt with an origin keeps its origin",
+			line:   `{"type":"user","origin":{"kind":"human"},"promptSource":"typed","timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityHuman,
+			wantAt: at,
+		},
+		{
+			name:   "queued human prompt",
+			line:   `{"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"human"}},"timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityHuman,
+			wantAt: at,
+		},
+		{
+			name:   "user record with neither origin nor sdk source",
+			line:   `{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-09-26T19:00:00Z"}`,
+			want:   ActivityNone,
+			wantAt: at,
+		},
+		{
 			name:   "human with null tool result",
 			line:   `{"type":"user","origin":{"kind":"human"},"toolUseResult":null,"timestamp":"2026-09-26T19:00:00Z"}`,
 			want:   ActivityHuman,
