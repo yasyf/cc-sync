@@ -346,7 +346,7 @@ func TestHumanErrors(t *testing.T) {
 	}
 }
 
-func TestUnavailableService(t *testing.T) {
+func TestUnavailableJSON(t *testing.T) {
 	commands := [][]string{
 		{"install"},
 		{"uninstall"},
@@ -360,8 +360,8 @@ func TestUnavailableService(t *testing.T) {
 	}
 	for _, args := range commands {
 		t.Run(args[0], func(t *testing.T) {
-			got := run(cli.UnavailableService{}, append(args, "--json")...)
-			want := `{"version":1,"ok":false,"error":{"code":"unavailable","message":"` + args[0] + `: cc-sync service is not wired into this build"}}` + "\n"
+			got := run(&fakeService{err: cli.Errorf(cli.CodeUnavailable, "helper not running")}, append(args, "--json")...)
+			want := `{"version":1,"ok":false,"error":{"code":"unavailable","message":"helper not running"}}` + "\n"
 			if got.exit != cli.ExitUnavailable || got.stdout != want {
 				t.Errorf("got exit %d stdout %q; want exit 5 stdout %q", got.exit, got.stdout, want)
 			}
