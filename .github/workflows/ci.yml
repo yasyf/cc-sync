@@ -29,6 +29,22 @@ jobs:
       - name: Build
         run: go build ./...
 
+  e2e:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install git-lfs
+        run: brew install git-lfs && git lfs install
+      - name: Test (e2e, race)
+        env:
+          GOWORK: "off"
+        run: go test -tags e2e -race -count=1 -timeout 15m ./internal/e2e/
+
   # synckit and daemonkit compile only on darwin, so the analysis jobs
   # cross-target darwin from ubuntu instead of billing macOS minutes.
   lint:
