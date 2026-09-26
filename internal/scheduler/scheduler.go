@@ -136,9 +136,11 @@ type Scheduler struct {
 
 	kicks   chan kickRequest
 	results chan finished
-	stop    chan struct{}
-	stopped sync.Once
 	exited  chan struct{}
+
+	life   sync.Mutex
+	halted bool
+	cancel context.CancelFunc
 
 	mu        sync.Mutex
 	units     map[string]*entry
@@ -210,35 +212,33 @@ func New(cfg Config, inv Inventory, stamper Stamper, capt Capturer, pub Publishe
 		pub:     pub,
 		kicks:   make(chan kickRequest),
 		results: make(chan finished, cfg.Workers),
-		stop:    make(chan struct{}),
 		exited:  make(chan struct{}),
 		units:   map[string]*entry{},
 	}, nil
 }
 
-// Run scans and captures until ctx is canceled or Stop is called. It then
-// cancels in-flight captures, waits for them, and flushes a pending publish.
-// It returns nil after Stop and ctx's error after cancellation.
+// Run scans and captures until ctx is canceled or Stop is called. Either one
+// cancels an inventory scan and in-flight captures at once; Run then waits for
+// the captures and flushes a pending publish. It returns nil after Stop,
+// without scanning when Stop came first, and ctx's error after cancellation.
 func (s *Scheduler) Run(ctx context.Context) error {
-	defer close(s.exited)
 	work, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if !s.start(cancel) {
+		return nil
+	}
+	defer close(s.exited)
 	var workers sync.WaitGroup
 	s.rescan(work)
 	nextScan := time.Now().Add(s.cfg.ScanInterval)
 	timer := time.NewTimer(s.cfg.ScanInterval)
 	defer timer.Stop()
-	for {
+	for work.Err() == nil {
 		s.dispatch(work, &workers)
 		s.publish(work)
 		timer.Reset(time.Until(s.wake(nextScan)))
 		select {
-		case <-ctx.Done():
-			s.drain(ctx, cancel, &workers)
-			return ctx.Err()
-		case <-s.stop:
-			s.drain(ctx, cancel, &workers)
-			return nil
+		case <-work.Done():
 		case f := <-s.results:
 			s.finish(f)
 		case req := <-s.kicks:
@@ -251,6 +251,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			}
 		}
 	}
+	s.drain(ctx, &workers)
+	return ctx.Err()
 }
 
 // Kick scans at once, makes the units holding sessionIDs (every unit when
@@ -281,10 +283,22 @@ func (s *Scheduler) Kick(ctx context.Context, sessionIDs ...string) ([]Attempt, 
 	}
 }
 
-// Stop cancels in-flight captures at their next safe point and returns once
-// Run has drained and returned. Call it only after Run has started.
+// Stop cancels an inventory scan and in-flight captures at their next safe
+// point and returns once Run has drained and returned. Before Run starts, it
+// returns at once, fails pending and later Kicks with ErrStopped, and makes Run
+// return nil. Repeated calls are harmless.
 func (s *Scheduler) Stop() {
-	s.stopped.Do(func() { close(s.stop) })
+	s.life.Lock()
+	cancel := s.cancel
+	if cancel == nil && !s.halted {
+		close(s.exited)
+	}
+	s.halted = true
+	s.life.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
 	<-s.exited
 }
 
@@ -311,8 +325,18 @@ func (s *Scheduler) Status() Status {
 	return st
 }
 
+func (s *Scheduler) start(cancel context.CancelFunc) bool {
+	s.life.Lock()
+	defer s.life.Unlock()
+	if s.halted {
+		return false
+	}
+	s.cancel = cancel
+	return true
+}
+
 func (s *Scheduler) rescan(ctx context.Context) {
-	if err := s.scan(ctx); err != nil {
+	if err := s.scan(ctx); err != nil && ctx.Err() == nil {
 		slog.Warn("scheduler scan failed", "err", err)
 	}
 }
@@ -424,6 +448,9 @@ func (s *Scheduler) finish(f finished) {
 
 func (s *Scheduler) kick(ctx context.Context, req kickRequest) {
 	if err := s.scan(ctx); err != nil {
+		if ctx.Err() != nil {
+			err = ErrStopped
+		}
 		req.reply <- kickReply{err: fmt.Errorf("kick: %w", err)}
 		return
 	}
@@ -510,8 +537,7 @@ func (s *Scheduler) wake(nextScan time.Time) time.Time {
 	return wake
 }
 
-func (s *Scheduler) drain(ctx context.Context, cancel context.CancelFunc, workers *sync.WaitGroup) {
-	cancel()
+func (s *Scheduler) drain(ctx context.Context, workers *sync.WaitGroup) {
 	for s.running > 0 {
 		s.finish(<-s.results)
 	}
