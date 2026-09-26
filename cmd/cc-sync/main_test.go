@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"reflect"
 	"testing"
 
@@ -70,6 +71,37 @@ func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 			}
 			if err.Error() != tt.msg {
 				t.Fatalf("Status() error = %q, want %q", err, tt.msg)
+			}
+		})
+	}
+}
+
+func TestSynckitdMissingIsUnavailable(t *testing.T) {
+	notFound := fmt.Errorf("synckitd register m.json: %w", &exec.Error{Name: "synckitd", Err: exec.ErrNotFound})
+	failed := errors.New("synckitd install: exit status 1: boom")
+	tests := []struct {
+		name        string
+		err         error
+		unavailable bool
+		msg         string
+	}{
+		{
+			name: "not on PATH", err: notFound, unavailable: true,
+			msg: `unavailable: synckitd is not installed: synckitd register m.json: exec: "synckitd": executable file not found in $PATH`,
+		},
+		{name: "ran and failed", err: failed, msg: "synckitd install: exit status 1: boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := synckitdMissing(tt.err)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("synckitdMissing() = %v, want it to wrap %v", err, tt.err)
+			}
+			if got := errors.Is(err, service.ErrUnavailable); got != tt.unavailable {
+				t.Fatalf("errors.Is(%v, ErrUnavailable) = %t, want %t", err, got, tt.unavailable)
+			}
+			if err.Error() != tt.msg {
+				t.Fatalf("synckitdMissing() = %q, want %q", err, tt.msg)
 			}
 		})
 	}

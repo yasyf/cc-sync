@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -196,7 +197,7 @@ func (i residentInstaller) Install(ctx context.Context, req cli.InstallRequest) 
 		err = resident.Install(ctx, resident.ExecRunner, i.layout, self)
 	}
 	if err != nil {
-		return cli.InstallResult{}, err
+		return cli.InstallResult{}, synckitdMissing(err)
 	}
 	res := cli.InstallResult{ConfigDir: i.layout.Dir, Synckitd: !req.NoSynckitd}
 	status, err := i.helper.Status(ctx)
@@ -220,9 +221,16 @@ func (i residentInstaller) Uninstall(ctx context.Context, req cli.UninstallReque
 		purge = []string{i.layout.Dir, root}
 	}
 	if err := resident.Uninstall(ctx, resident.ExecRunner, purge); err != nil {
-		return cli.UninstallResult{}, err
+		return cli.UninstallResult{}, synckitdMissing(err)
 	}
 	return cli.UninstallResult{Purged: req.Purge}, nil
+}
+
+func synckitdMissing(err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("%w: synckitd is not installed: %w", service.ErrUnavailable, err)
+	}
+	return err
 }
 
 func serve(ctx context.Context, layout config.Layout) error {

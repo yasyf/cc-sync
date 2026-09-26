@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/resident"
 	"github.com/yasyf/synckit/hostregistry"
 )
@@ -732,6 +733,24 @@ func TestInstallProbeRace(t *testing.T) {
 		"would boot out and replace the live com.github.yasyf.synckit.serve; the rendered plist Env also drops " +
 		"DAEMONKIT_HOME/HOME. No launchctl call is made. Opening it needs a label-prefix override honored under " +
 		"DAEMONKIT_HOME plus isolation-env propagation into the plists, or a throwaway macOS user/VM.")
+}
+
+func TestInstallWithoutSynckitd(t *testing.T) {
+	d := newHost(t, "D", bin)
+	for i, kv := range d.env {
+		if strings.HasPrefix(kv, "PATH=") {
+			d.env[i] = "PATH=/usr/bin:/bin"
+		}
+	}
+	for _, args := range [][]string{{"install"}, {"uninstall"}} {
+		doc := d.json(cli.ExitUnavailable, args...)
+		if field(t, doc, "ok") != false || field(t, doc, "error", "code") != "unavailable" {
+			t.Fatalf("%v without synckitd on PATH = %v, want an unavailable failure", args, doc)
+		}
+		if msg, _ := field(t, doc, "error", "message").(string); !strings.Contains(msg, "synckitd is not installed") {
+			t.Fatalf("%v error.message = %q, want it to name synckitd not installed", args, msg)
+		}
+	}
 }
 
 func TestVersionSkewOldSynckitd(t *testing.T) {
