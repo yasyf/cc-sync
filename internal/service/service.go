@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/claudenative"
 	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
@@ -16,8 +17,6 @@ import (
 	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/netpolicy"
-
-	"github.com/yasyf/cc-sync/internal/catalog"
 )
 
 // ErrUnavailable marks a dependency that is not running on this host or not
