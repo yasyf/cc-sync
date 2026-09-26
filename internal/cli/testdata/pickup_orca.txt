@@ -1,0 +1,4 @@
+checkout restored: /Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200 on feature/sync
+session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: resumed
+session 7a1e4c2b-9d3f-4b6a-8e5c-1f0a2b3c4d5e: dormant
+orca worktree orca-wt-9: 1 resumed, 1 dormant

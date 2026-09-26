@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "ok": true,
+  "selector": "host-mini/wt-01",
+  "source": {
+    "host_id": "host-mini",
+    "host_name": "mini",
+    "last_seen_at": null,
+    "reachable": false
+  },
+  "workspace": {
+    "id": "wt-01",
+    "repo_name": "scratch",
+    "repo_origin": null,
+    "branch": null,
+    "source_path": "/Users/yasyf/scratch",
+    "orca": null
+  },
+  "sessions": [],
+  "checkpoint": {
+    "id": "abc123",
+    "tier": "daily",
+    "captured_at": "2026-09-26T16:00:00Z",
+    "source_activity_at": null
+  },
+  "checkpoint_count": 1,
+  "completeness": {
+    "ready": false,
+    "missing": [
+      "lfs:assets/model.bin",
+      "submodule:vendor/lib"
+    ],
+    "transcript": "partial",
+    "code": "missing",
+    "layout": "none"
+  },
+  "pause": {
+    "reason": "cellular",
+    "endpoint": "peer",
+    "since": "2026-09-26T18:00:00Z"
+  },
+  "local_checkout": null,
+  "checkpoints": [],
+  "delivery": []
+}
