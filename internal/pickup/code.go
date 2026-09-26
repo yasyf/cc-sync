@@ -9,14 +9,32 @@ import (
 	"strings"
 
 	"github.com/yasyf/cc-sync/internal/codesnap"
+	"github.com/yasyf/reposync/registry"
 	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 )
 
 // WorktreeRestorer is reposync's worktree.Store.Restore with the receiver's
-// registry bound.
+// registry bound; Worktrees is the production one.
 type WorktreeRestorer interface {
 	Restore(ctx context.Context, snap worktree.Snapshot, src worktree.ArtifactSource, opts RestoreOptions) (Restored, error)
+}
+
+// Worktrees is the WorktreeRestorer over a reposync store, restoring against
+// the reposync registry Registry loads at each restore.
+type Worktrees struct {
+	Store    *worktree.Store
+	Registry func() (registry.Registry, error)
+}
+
+// Restore materializes snap from src as a recovery worktree of its
+// registered checkout.
+func (w Worktrees) Restore(ctx context.Context, snap worktree.Snapshot, src worktree.ArtifactSource, opts RestoreOptions) (Restored, error) {
+	reg, err := w.Registry()
+	if err != nil {
+		return Restored{}, fmt.Errorf("load reposync registry: %w", err)
+	}
+	return w.Store.Restore(ctx, reg, snap, src, opts)
 }
 
 // Reposync is the CodeRestorer that reads a code group through codesnap and

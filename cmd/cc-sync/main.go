@@ -15,12 +15,14 @@ import (
 	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/helperclient"
 	applog "github.com/yasyf/cc-sync/internal/log"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/pickup"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/cc-sync/internal/service"
 	"github.com/yasyf/cc-sync/internal/sessionrestore"
+	"github.com/yasyf/reposync/registry"
 	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/delivery"
@@ -186,7 +188,7 @@ type localPicker struct {
 	layout config.Layout
 }
 
-func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.PickupResult, error) {
+func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (_ cli.PickupResult, err error) {
 	claude, err := claudenative.DefaultLayout()
 	if err != nil {
 		return cli.PickupResult{}, err
@@ -195,19 +197,32 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.Pic
 	if err != nil {
 		return cli.PickupResult{}, fmt.Errorf("resolve home: %w", err)
 	}
+	network, err := currentNetwork(ctx)
+	if err != nil {
+		return cli.PickupResult{}, err
+	}
+	code, err := worktree.OpenStore(p.layout.CodeStore)
+	if err != nil {
+		return cli.PickupResult{}, fmt.Errorf("open reposync store: %w", err)
+	}
+	helper, err := helperclient.Dial()
+	if err != nil {
+		return cli.PickupResult{}, err
+	}
+	defer func() { err = errors.Join(err, helper.Close()) }()
 	cfg := pickup.Config{
 		Catalog:   meshCatalog{path: p.layout.CatalogPath},
-		Pinner:    unwiredPinner{},
+		Pinner:    helper,
 		OpenStore: openArtifacts,
 		Verifier:  unwiredVerifier{},
-		Code:      pickup.Reposync{Worktrees: unwiredWorktrees{}},
+		Code:      pickup.Reposync{Worktrees: pickup.Worktrees{Store: code, Registry: registry.Load}},
 		Sessions: &pickup.Native{
 			Run:           sessionrestore.SystemRunner(),
 			Procs:         claudenative.SystemProcesses(),
 			DisplacedRoot: filepath.Join(p.layout.Dir, "displaced"),
 			Now:           time.Now,
 		},
-		FetchAllowed: func() bool { return false },
+		FetchAllowed: network.Unrestricted,
 		Layout:       claude,
 		Home:         home,
 		ReplicaRoot:  p.layout.ReplicaRoot,
@@ -231,20 +246,8 @@ func openArtifacts(context.Context) (pickup.Store, error) {
 	return artifact.OpenReadOnly(root)
 }
 
-type unwiredPinner struct{}
-
-func (unwiredPinner) Pin(context.Context, string, []artifact.Ref, time.Duration) error {
-	return unwired("the ccsync.pin.v1 client")
-}
-
 type unwiredVerifier struct{}
 
 func (unwiredVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
 	return consumer.CodeVerdict{}, unwired("the reposync code verifier")
-}
-
-type unwiredWorktrees struct{}
-
-func (unwiredWorktrees) Restore(context.Context, worktree.Snapshot, worktree.ArtifactSource, pickup.RestoreOptions) (pickup.Restored, error) {
-	return pickup.Restored{}, unwired("the reposync Store.Restore adapter")
 }
