@@ -16,10 +16,13 @@ import (
 	"github.com/yasyf/synckit/artifact"
 )
 
+// MediaCode is the media of the code group a checkpoint root names: its first
+// dependency is the code manifest, the rest the snapshot's artifact closure.
+const MediaCode = "cc-sync.code"
+
 const (
 	digestPrefix      = "sha256:"
 	mediaCodeManifest = "cc-sync.code-manifest"
-	mediaCode         = "cc-sync.code"
 	mediaCodeDeps     = "cc-sync.code-deps"
 )
 

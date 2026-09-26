@@ -358,8 +358,8 @@ func TestCodeRootDeps(t *testing.T) {
 		t.Fatalf("Manifest(root): %v", err)
 	}
 	raws := append(snap.Artifacts(), src.manifest.Snapshot)
-	if rootManifest.Media != mediaCode || len(rootManifest.Deps) != 1+len(raws) {
-		t.Fatalf("root = %q with %d deps, want %q with %d", rootManifest.Media, len(rootManifest.Deps), mediaCode, 1+len(raws))
+	if rootManifest.Media != MediaCode || len(rootManifest.Deps) != 1+len(raws) {
+		t.Fatalf("root = %q with %d deps, want %q with %d", rootManifest.Media, len(rootManifest.Deps), MediaCode, 1+len(raws))
 	}
 	first, err := f.store.Manifest(t.Context(), rootManifest.Deps[0])
 	if err != nil || first.Media != mediaCodeManifest {
@@ -408,8 +408,8 @@ func TestGroupFansOutPastMaxDeps(t *testing.T) {
 	}
 	closure := f.store.closure(root)
 	top := closure[root.Digest]
-	if top.Media != mediaCode || len(top.Deps) != 3 || top.Deps[0] != manifest {
-		t.Fatalf("root = %q deps %d first %v, want %q deps 3 first %v", top.Media, len(top.Deps), top.Deps[0], mediaCode, manifest)
+	if top.Media != MediaCode || len(top.Deps) != 3 || top.Deps[0] != manifest {
+		t.Fatalf("root = %q deps %d first %v, want %q deps 3 first %v", top.Media, len(top.Deps), top.Deps[0], MediaCode, manifest)
 	}
 	for i, want := range []int{artifact.MaxDeps, 1} {
 		if sub := closure[top.Deps[i+1].Digest]; sub.Media != mediaCodeDeps || len(sub.Deps) != want {

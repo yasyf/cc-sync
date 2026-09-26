@@ -39,6 +39,9 @@ type Source struct {
 	SessionID      string
 	SourceHost     string
 	ConfigDir      string
+	Home           string
+	TmpRoot        string
+	UID            int
 	ProjectDirName string
 	TranscriptPath string
 	SessionDir     string
@@ -345,6 +348,9 @@ func (c *capturer) manifest() Manifest {
 		CapturedAt:     c.src.CapturedAt.UTC(),
 		ClaudeVersion:  c.src.ClaudeVersion,
 		ConfigDir:      c.src.ConfigDir,
+		Home:           c.src.Home,
+		TmpRoot:        c.src.TmpRoot,
+		UID:            c.src.UID,
 		ProjectDirName: c.src.ProjectDirName,
 		Cwd:            c.src.Cwd,
 		OriginalCwd:    c.src.OriginalCwd,
