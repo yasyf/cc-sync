@@ -35,8 +35,8 @@ github.com/yasyf/daemonkit v0.23.0 h1:3ov00O4cEIbXAfj9h6uBpf8PMluGJcGGRvB5IVZhHX
 github.com/yasyf/daemonkit v0.23.0/go.mod h1:mnfLEwDeeyEmq7Dj+4/lJZ60sBcdI7GlWXLLuBSapyw=
 github.com/yasyf/reposync v0.30.2-0.20260926220938-826a351c70a0 h1:fioCLIzthW/kEuDAMw4r1sybpa6bz/3l/OqqjZxOxbI=
 github.com/yasyf/reposync v0.30.2-0.20260926220938-826a351c70a0/go.mod h1:FwEHY7isamSHGCwXwNvQNh19hT/tKtHVBkb5ST5v/hg=
-github.com/yasyf/synckit v0.39.3-0.20260926214603-6a26bc7530e4 h1:ilx4CII68weSAHD8QKPDqn/iL3FVjiTRncx68S518Kc=
-github.com/yasyf/synckit v0.39.3-0.20260926214603-6a26bc7530e4/go.mod h1:NQUUFEC04zDKbjudVxPvobqA+zfgBc9xzetrNvIju/4=
+github.com/yasyf/synckit v0.39.3-0.20260926233342-e3e37e75f2bf h1:6PC0pS5QltdXTTkAUUCXDX3/Ac7n4KcCMv2olSz4iSI=
+github.com/yasyf/synckit v0.39.3-0.20260926233342-e3e37e75f2bf/go.mod h1:NQUUFEC04zDKbjudVxPvobqA+zfgBc9xzetrNvIju/4=
 go.etcd.io/bbolt v1.5.0 h1:S7GAl7Fxv12yohbwFfIbQCGDWbQbtDGPET4P/bD4lxU=
 go.etcd.io/bbolt v1.5.0/go.mod h1:mkltfYE5aUHQxUct9N9V+Kp7aSjFqjgrhcXIS70Lrdk=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
