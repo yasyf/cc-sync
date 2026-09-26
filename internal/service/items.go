@@ -318,9 +318,6 @@ func (v view) detail(origin string, cp catalog.Checkpoint) cli.CheckpointDetail 
 		Missing:    cli.Array[string](slices.Clone(r.Missing)),
 		Deferred:   cli.Array[string]{},
 	}
-	if cp.Deferred != "" {
-		d.Deferred = append(d.Deferred, cp.Deferred)
-	}
 	if r.Deferred != "" {
 		d.Deferred = append(d.Deferred, r.Deferred)
 	}
