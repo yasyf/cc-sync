@@ -268,6 +268,7 @@ func (h *Host) pipeline(c resident.Capture[*artifact.Store]) (resident.Pipeline,
 		Stamper:   loggedStamper{log: h.Captures, next: job},
 		Capturer:  loggedCapturer{log: h.Captures, next: job},
 		Verifier:  verifier,
+		Expirer:   job,
 	}, nil
 }
 
