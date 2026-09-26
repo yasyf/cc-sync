@@ -101,9 +101,9 @@ func TestRetainNeverLetsIncompleteEvictComplete(t *testing.T) {
 			want: []string{"incomplete:[latest]", "complete:[latest hourly daily]"},
 		},
 		{
-			name: "omission newer than complete",
+			name: "omission is complete",
 			cps:  []Checkpoint{cp("complete", 30*time.Minute, nil), cp("omitted", 10*time.Minute, omitted)},
-			want: []string{"omitted:[latest]", "complete:[latest hourly daily]"},
+			want: []string{"omitted:[latest hourly daily]"},
 		},
 		{
 			name: "newest mixed and newest incomplete",

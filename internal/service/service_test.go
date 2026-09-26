@@ -412,7 +412,7 @@ func TestSelectors(t *testing.T) {
 		want string
 		code cli.Code
 	}{
-		{"latest skips mixed and omitted", cli.LatestCheckpoint{}, "aaa100", ""},
+		{"latest skips mixed", cli.LatestCheckpoint{}, "aaa200", ""},
 		{"id prefix", cli.CheckpointID{Prefix: "aaa3"}, "aaa300", ""},
 		{"ambiguous prefix", cli.CheckpointID{Prefix: "aaa"}, "", cli.CodeUsage},
 		{"unknown prefix", cli.CheckpointID{Prefix: "fff"}, "", cli.CodeNotFound},

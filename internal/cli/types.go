@@ -349,7 +349,7 @@ type Checkpoint struct {
 }
 
 // Completeness is a checkpoint's local readiness; Ready is never true while
-// anything required is missing, partial, or omitted. Deferred code carries the
+// anything required is missing, partial, or deferred. Deferred code carries the
 // most recent complete code snapshot, captured at CodeCapturedAt, which may be
 // older than the checkpoint's sessions; CodeCapturedAt is nil when the
 // checkpoint carries no code snapshot.

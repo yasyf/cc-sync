@@ -113,11 +113,12 @@ type Checkpoint struct {
 func (cp Checkpoint) Mixed() bool { return cp.Deferred != "" }
 
 // Complete reports whether cp is a complete recovery point: its code is not
-// deferred, every session artifact it references was archived, and Orca
-// omitted no binding. Only complete checkpoints claim retention tiers, count
-// as pick-up ready, or are reported durable on a peer.
+// deferred and every session artifact it references was archived. Omitted
+// bindings are agents v1 cannot restore and never make a Claude recovery
+// point incomplete. Only complete checkpoints claim retention tiers, count as
+// pick-up ready, or are reported durable on a peer.
 func (cp Checkpoint) Complete() bool {
-	return !cp.Mixed() && cp.Completeness.Complete && len(cp.Omitted) == 0
+	return !cp.Mixed() && cp.Completeness.Complete
 }
 
 // Session summarizes one Claude session archived in a checkpoint.
