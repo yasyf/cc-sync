@@ -40,31 +40,14 @@ type CodeRestorer interface {
 	Remove(ctx context.Context, r Restored) error
 }
 
-// RestoreOptions mirrors reposync's worktree.RestoreOptions. ApplySparse
-// re-applies the source's sparse-checkout patterns in a new recovery worktree
-// instead of expanding it to a full checkout.
-type RestoreOptions struct {
-	Dest        string
-	Branch      string
-	Fresh       bool
-	FetchLFS    bool
-	ApplySparse bool
-}
+// RestoreOptions places a restored snapshot. ApplySparse re-applies the
+// source's sparse-checkout patterns in a new recovery worktree instead of
+// expanding it to a full checkout.
+type RestoreOptions = worktree.RestoreOptions
 
-// Restored mirrors reposync's worktree.Restored. Sparse holds the source's
+// Restored describes a recovery checkout. Sparse holds the source's
 // sparse-checkout patterns, set whenever the source worktree was sparse.
-type Restored struct {
-	Path        string
-	Branch      string
-	Head        string
-	Reused      bool
-	Applied     string
-	Newer       bool
-	LFSPending  []string
-	Exact       bool
-	Differences []string
-	Sparse      *worktree.Sparse
-}
+type Restored = worktree.Restored
 
 // SessionRestorer plans the native install of one session replica without
 // writing native state; the returned PreparedSession applies it.
