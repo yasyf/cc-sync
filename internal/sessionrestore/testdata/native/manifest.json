@@ -1,0 +1,45 @@
+{
+  "placeholders": {
+    "{{SRC_CWD}}": "absolute source working directory: a test-chosen root joined with the session's cwd",
+    "{{SRC_CONFIG}}": "absolute source Claude config dir",
+    "{{SRC_TMP}}": "absolute source scratchpad root, /private/tmp/claude-<uid> natively",
+    "{{SRC_PROJECT}}": "project dir name Claude derives from {{SRC_CWD}}"
+  },
+  "sessions": [
+    {
+      "name": "main",
+      "sessionId": "f1c7c7e0-0000-4000-8000-00000000a001",
+      "cwd": "src/ünïcödé dir (x)+y",
+      "files": [
+        {"fixture": "main/transcript.jsonl", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001.jsonl"},
+        {"fixture": "main/subagents/agent-af1c7c7e000000001.jsonl", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001/subagents/agent-af1c7c7e000000001.jsonl"},
+        {"fixture": "main/subagents/agent-af1c7c7e000000001.meta.json", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001/subagents/agent-af1c7c7e000000001.meta.json"},
+        {"fixture": "main/tool-results/f1c7res01.txt", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001/tool-results/f1c7res01.txt"},
+        {"fixture": "main/tasks/1.json", "native": "{{SRC_CONFIG}}/tasks/f1c7c7e0-0000-4000-8000-00000000a001/1.json"},
+        {"fixture": "main/plans/fixture-plan-quiet-otter.md", "native": "{{SRC_CONFIG}}/plans/fixture-plan-quiet-otter.md"},
+        {"fixture": "main/file-history/f1c7c7e0f1c7c7e0@v1", "native": "{{SRC_CONFIG}}/file-history/f1c7c7e0-0000-4000-8000-00000000a001/f1c7c7e0f1c7c7e0@v1"}
+      ],
+      "symlinks": [
+        {"native": "{{SRC_TMP}}/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001/tasks/af1c7c7e000000001.output", "target": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a001/subagents/agent-af1c7c7e000000001.jsonl"}
+      ]
+    },
+    {
+      "name": "long",
+      "sessionId": "f1c7c7e0-0000-4000-8000-00000000a002",
+      "cwd": "long/llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll/😀 oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo/deep",
+      "files": [
+        {"fixture": "long/transcript.jsonl", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a002.jsonl"}
+      ],
+      "symlinks": []
+    },
+    {
+      "name": "partial",
+      "sessionId": "f1c7c7e0-0000-4000-8000-00000000a003",
+      "cwd": "partial ü",
+      "files": [
+        {"fixture": "partial/transcript.jsonl", "native": "{{SRC_CONFIG}}/projects/{{SRC_PROJECT}}/f1c7c7e0-0000-4000-8000-00000000a003.jsonl"}
+      ],
+      "symlinks": []
+    }
+  ]
+}
