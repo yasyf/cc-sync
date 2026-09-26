@@ -40,7 +40,3 @@ repos:
         language_version: '1.26.6'
       - id: golangci-lint
         language_version: '1.26.6'
-
-# Native session fixtures assert exact bytes, including a partial last line
-# with no trailing newline; hygiene hooks must not rewrite them.
-exclude: ^internal/sessionrestore/testdata/native/

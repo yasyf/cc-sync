@@ -127,7 +127,7 @@ func block(t *testing.T, s *Store, origin string) Origin {
 
 func TestRetain(t *testing.T) {
 	mk := func(id string, captured, activity time.Time) Checkpoint {
-		return Checkpoint{ID: id, CapturedAt: captured, SourceActivityAt: activity, ExpiresAt: activity.Add(ExpiryWindow)}
+		return Checkpoint{ID: id, CapturedAt: captured, SourceActivityAt: activity, ExpiresAt: activity.Add(ExpiryWindow), Completeness: Completeness{Complete: true}}
 	}
 	tests := []struct {
 		name string
@@ -223,6 +223,79 @@ func TestRecordDerivesExpiryAndBumpsRevision(t *testing.T) {
 	record(t, s, "w1", point("r5", t0.Add(time.Hour), t0.Add(time.Hour)))
 	if o := block(t, s, "a"); o.Revision != micros(c.t) {
 		t.Fatalf("revision = %d, want now in micros %d", o.Revision, micros(c.t))
+	}
+}
+
+func classesByRoot(t *testing.T, s *Store, wt string, roots ...string) map[string][]Class {
+	t.Helper()
+	names := make(map[string]string, len(roots))
+	for _, r := range roots {
+		names[CheckpointID("a", wt, ref(r))] = r
+	}
+	got := map[string][]Class{}
+	for _, cp := range block(t, s, "a").Worktrees[0].Checkpoints {
+		got[names[cp.ID]] = cp.Classes
+	}
+	return got
+}
+
+func TestRecordSameCapturedAtNewestRecordWins(t *testing.T) {
+	all := []Class{ClassLatest, ClassHourly, ClassDaily}
+	tests := []struct {
+		name          string
+		first, second string
+		partial       bool
+		want          map[string][]Class
+	}{
+		{"r1 then r2", "r1", "r2", false, map[string][]Class{"r2": all}},
+		{"r2 then r1", "r2", "r1", false, map[string][]Class{"r1": all}},
+		{"incomplete r2 beside complete r1", "r1", "r2", true, map[string][]Class{"r2": {ClassLatest}, "r1": all}},
+		{"incomplete r1 beside complete r2", "r2", "r1", true, map[string][]Class{"r1": {ClassLatest}, "r2": all}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(t, "a", &clock{t: t0})
+			record(t, s, "w1", point(tt.first, t0, t0))
+			second := point(tt.second, t0, t0)
+			if tt.partial {
+				second.Completeness = Completeness{Missing: []string{"paste-cache/abc"}}
+			}
+			got := record(t, s, "w1", second)
+			if !slices.Equal(got.Classes, tt.want[tt.second]) {
+				t.Fatalf("recorded classes = %v, want %v", got.Classes, tt.want[tt.second])
+			}
+			if kept := classesByRoot(t, s, "w1", tt.first, tt.second); !reflect.DeepEqual(kept, tt.want) {
+				t.Fatalf("retained = %v, want %v", kept, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecordReclaimsSameCapturedAtOnlyWhenOutranked(t *testing.T) {
+	s := newStore(t, "a", &clock{t: t0})
+	record(t, s, "w1", point("r1", t0, t0))
+	record(t, s, "w1", point("r2", t0, t0))
+	record(t, s, "w1", point("r1", t0, t0))
+	if kept := classesByRoot(t, s, "w1", "r1", "r2"); !reflect.DeepEqual(kept, map[string][]Class{"r1": {ClassLatest, ClassHourly, ClassDaily}}) {
+		t.Fatalf("re-recorded r1 retained = %v, want r1 alone in every class", kept)
+	}
+	revision := block(t, s, "a").Revision
+	record(t, s, "w1", point("r1", t0, t0))
+	if o := block(t, s, "a"); o.Revision != revision {
+		t.Fatalf("re-recording the newest checkpoint moved revision %d to %d", revision, o.Revision)
+	}
+}
+
+func TestRecordSupersededIsNotExpired(t *testing.T) {
+	s := newStore(t, "a", &clock{t: t0})
+	record(t, s, "w1", point("r1", t0, t0))
+	revision := block(t, s, "a").Revision
+	_, err := s.Record(t.Context(), tree("w1"), point("r0", t0.Add(-time.Minute), t0.Add(-time.Minute)))
+	if !errors.Is(err, ErrSuperseded) || errors.Is(err, ErrExpired) {
+		t.Fatalf("Record older same-hour checkpoint = %v, want ErrSuperseded", err)
+	}
+	if o := block(t, s, "a"); o.Revision != revision {
+		t.Fatalf("superseded record moved revision %d to %d", revision, o.Revision)
 	}
 }
 
@@ -636,7 +709,7 @@ func TestEchoedOwnBlockNeverOverridesOwnState(t *testing.T) {
 func TestRetainKeepsLastCompleteUnderMixed(t *testing.T) {
 	at := func(d time.Duration) time.Time { return t0.Add(-d) }
 	cp := func(id string, age time.Duration, deferred string) Checkpoint {
-		return Checkpoint{ID: id, CapturedAt: at(age), ExpiresAt: t0.Add(24 * time.Hour), Deferred: deferred}
+		return Checkpoint{ID: id, CapturedAt: at(age), ExpiresAt: t0.Add(24 * time.Hour), Deferred: deferred, Completeness: Completeness{Complete: true}}
 	}
 	kept := Retain([]Checkpoint{
 		cp("complete", 30*time.Minute, ""),

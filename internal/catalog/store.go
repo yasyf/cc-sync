@@ -36,6 +36,9 @@ const (
 var (
 	// ErrExpired reports a recorded checkpoint that expired before retention.
 	ErrExpired = errors.New("catalog: checkpoint already expired")
+	// ErrSuperseded reports a recorded checkpoint that claims no retention
+	// class because newer checkpoints of its worktree already hold them.
+	ErrSuperseded = errors.New("catalog: checkpoint superseded")
 	// ErrOriginBlockConflict refuses a change carrying an origin block at a
 	// revision this host already holds with different content.
 	ErrOriginBlockConflict = errors.New("catalog: origin-block-conflict")
@@ -58,10 +61,60 @@ type Evidence struct {
 }
 
 // Snapshot is a read-only view of the catalog as of this host's clock.
+// Carried maps each of this host's checkpoints to the export revision since
+// which every export has carried its root.
 type Snapshot struct {
 	Self      string
 	Origins   []Origin
 	Readiness map[string]Readiness
+	Carried   map[string]uint64
+}
+
+// Assurance is what a peer's acknowledgment establishes about one of this
+// host's checkpoints.
+type Assurance string
+
+// The assurances a peer's acknowledgment can give: none, the checkpoint held
+// but not a complete recovery point, or a complete recovery point durable on
+// the peer.
+const (
+	AssuranceNone    Assurance = ""
+	AssuranceHeld    Assurance = "held"
+	AssuranceDurable Assurance = "durable"
+)
+
+// HeldReady reports whether this host holds checkpoint cp of origin's block
+// ready: its root closure is in the local store and the code its root
+// references, a mixed checkpoint's older code included, is verified. A host's
+// own checkpoints are always held ready.
+func (s Snapshot) HeldReady(origin string, cp Checkpoint) bool {
+	return origin == s.Self || s.Readiness[cp.ID].Ready
+}
+
+// PickupReady reports whether cp is a complete recovery point held ready
+// here, the only kind a default pick-up or list targets.
+func (s Snapshot) PickupReady(origin string, cp Checkpoint) bool {
+	return cp.Complete() && s.HeldReady(origin, cp)
+}
+
+// AssuranceOf reports what acked, the source revision a peer last
+// acknowledged, establishes about this host's checkpoint cp at now. A peer
+// acknowledges a change only once it holds ready every checkpoint the change
+// carries that is unexpired by its clock, so acked at or past the revision
+// since which exports have carried cp means the peer holds cp: durably when
+// cp is Complete, as held but not a complete recovery point otherwise. An
+// acknowledgment is never assurance past cp.ExpiresAt on this host's clock,
+// and a peer whose clock runs ahead of this host's disposes of cp as expired,
+// unheld, that much sooner.
+func (s Snapshot) AssuranceOf(cp Checkpoint, acked uint64, now time.Time) Assurance {
+	since, carried := s.Carried[cp.ID]
+	switch {
+	case !carried || acked < since || !now.Before(cp.ExpiresAt):
+		return AssuranceNone
+	case cp.Complete():
+		return AssuranceDurable
+	}
+	return AssuranceHeld
 }
 
 // ReadinessOf reports checkpoint cp of origin's block on this host. A mixed
@@ -87,7 +140,7 @@ type Exported struct {
 }
 
 // GCResult reports one retention and expiry pass: checkpoints removed,
-// checkpoints ready here, and the roots of every retained checkpoint.
+// checkpoints pick-up ready here, and the roots of every retained checkpoint.
 type GCResult struct {
 	Removed int
 	Ready   int
@@ -124,6 +177,7 @@ type state struct {
 	Readiness map[string]Readiness  `json:"readiness"`
 	Receipts  []syncservice.Receipt `json:"receipts"`
 	Export    ledger                `json:"export"`
+	Carried   map[string]uint64     `json:"carried"`
 }
 
 // New returns the catalog persisted at path, locked through path+".lock",
@@ -183,13 +237,14 @@ func (s *Store) Load() (Snapshot, error) {
 	for _, o := range st.Origins {
 		origins = append(origins, expired(o, now))
 	}
-	return Snapshot{Self: st.Self, Origins: origins, Readiness: st.Readiness}, nil
+	return Snapshot{Self: st.Self, Origins: origins, Readiness: st.Readiness, Carried: st.Carried}, nil
 }
 
 // Record adds or replaces cp in this host's block under worktree wt, applies
 // retention to that worktree, and clears any tombstone for it, moving the
 // block revision only when the block changes. It derives the checkpoint's
-// ID, expiry, and classes and returns the checkpoint as retained.
+// ID, expiry, and classes and returns the checkpoint as retained. A record
+// makes its checkpoint the newest of those captured at the same instant.
 func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpoint, error) {
 	cp = normalized(s.self, wt.ID, cp)
 	var recorded Checkpoint
@@ -210,11 +265,18 @@ func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpo
 			orca.Freshness = orca.Freshness.UTC()
 			w.Orca = &orca
 		}
+		cp.Revision = nextRevision(own.Revision, now)
+		if k := slices.IndexFunc(w.Checkpoints, func(c Checkpoint) bool { return c.CapturedAt.Equal(cp.CapturedAt) }); k >= 0 && w.Checkpoints[k].ID == cp.ID {
+			cp.Revision = w.Checkpoints[k].Revision
+		}
 		others := slices.DeleteFunc(w.Checkpoints, func(c Checkpoint) bool { return c.ID == cp.ID })
 		w.Checkpoints = Retain(append(others, cp), now)
 		j := slices.IndexFunc(w.Checkpoints, func(c Checkpoint) bool { return c.ID == cp.ID })
-		if j < 0 {
+		switch {
+		case j < 0 && !now.Before(cp.ExpiresAt):
 			return false, fmt.Errorf("%w: %s expired at %s", ErrExpired, cp.ID, cp.ExpiresAt)
+		case j < 0:
+			return false, fmt.Errorf("%w: %s captured at %s holds no class beside newer checkpoints of %s", ErrSuperseded, cp.ID, cp.CapturedAt, wt.ID)
 		}
 		recorded = w.Checkpoints[j]
 		own.Tombstones = slices.DeleteFunc(own.Tombstones, func(t Tombstone) bool { return t.ID == wt.ID })
@@ -281,13 +343,14 @@ func (s *Store) Export(ctx context.Context) (Exported, error) {
 	var out Exported
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
 		p := st.exportable()
-		body, roots, err := exportDigests(p, now)
+		body, roots, refs, err := exportDigests(p, now)
 		if err != nil {
 			return false, err
 		}
 		changed := body != st.Export.Digest || roots != st.Export.Roots
 		if changed {
 			st.Export = ledger{Revision: nextRevision(st.Export.Revision, now), Digest: body, Roots: roots, AsOf: now}
+			st.Carried = st.carriedSince(refs, now)
 		}
 		p.AsOf = st.Export.AsOf
 		data, err := Encode(p)
@@ -306,7 +369,7 @@ func (s *Store) Digest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	body, roots, err := exportDigests(st.exportable(), s.now().UTC())
+	body, roots, _, err := exportDigests(st.exportable(), s.now().UTC())
 	if err != nil {
 		return "", err
 	}
@@ -323,8 +386,9 @@ func (s *Store) Fence(change syncservice.ChangeEnvelope) (syncservice.FenceDecis
 	return syncservice.Fence(st.receipt(change.Origin), change)
 }
 
-// Unverified returns the unexpired checkpoints of the relayed blocks that
-// applying p would hold and that are not yet ready here. It refuses p with
+// Unverified returns the unexpired relayed checkpoints p carries that
+// applying p leaves held here and not yet ready, whether their block is
+// admitted or older than its origin's fence. It refuses p with
 // ErrOriginBlockConflict exactly when Apply would.
 func (s *Store) Unverified(p Payload) ([]Checkpoint, error) {
 	st, err := s.read()
@@ -335,7 +399,13 @@ func (s *Store) Unverified(p Payload) ([]Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	return st.unready(admitted, s.now().UTC()), nil
+	now := s.now().UTC()
+	for _, in := range admitted {
+		if err := st.hold(in, now); err != nil {
+			return nil, err
+		}
+	}
+	return slices.DeleteFunc(st.carriedHeld(p, now), func(cp Checkpoint) bool { return st.Readiness[cp.ID].Ready }), nil
 }
 
 // Pending returns every unexpired held relayed checkpoint not yet ready
@@ -350,16 +420,21 @@ func (s *Store) Pending() ([]Checkpoint, error) {
 }
 
 // Apply merges p, the decoded payload of change, under the change's fence.
-// Per relayed origin, a block older than its fence is ignored, a newer one
-// replaces the held block verbatim, and an equal one must match the fenced
-// digest or the change is refused with ErrOriginBlockConflict and nothing is
-// recorded. A held checkpoint is ready only when its root closure is in
-// ev.Roots and its code verdict is ready; a held block becomes the relayed
-// one once every unexpired root in it is closure-complete, verified or not.
-// The change is acknowledged, and its receipt persisted, only when every
-// root it carries is closure-complete and every unexpired held checkpoint it
-// carries is ready; otherwise the merge is kept and the result is Partial
-// with the prior receipt.
+// Per relayed origin, a block older than its fence never replaces the held
+// block, a newer one replaces it verbatim, and an equal one must match the
+// fenced digest or the change is refused with ErrOriginBlockConflict and
+// nothing is recorded. A newer block whose checkpoints and tombstones have
+// all expired by this host's clock is disposed of: fenced but never held, so
+// none of it is recorded, ready, or relayed. A held checkpoint is ready only
+// when its root closure is in ev.Roots and its code verdict, a mixed
+// checkpoint's included, is ready; a held block becomes the relayed one once
+// every unexpired root in it is closure-complete, verified or not. The change
+// is acknowledged as processed, and its receipt persisted, only when every
+// carried root of an unexpired checkpoint is closure-complete and every
+// unexpired relayed checkpoint it carries that its origin's held block still
+// carries, a stale block's included, is ready here, even when it held
+// nothing; otherwise the merge is kept and the result is Partial with the
+// prior receipt.
 func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p Payload, ev Evidence) (syncservice.ApplyResult, error) {
 	var res syncservice.ApplyResult
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
@@ -376,33 +451,46 @@ func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p 
 		if err != nil {
 			return false, err
 		}
+		unexpiredRoots := make(map[artifact.Digest]bool)
+		for _, o := range p.Origins {
+			for _, cp := range live(o, now) {
+				unexpiredRoots[cp.Root.Digest] = true
+			}
+		}
 		carried := make(map[artifact.Digest]bool, len(change.Artifacts))
 		complete := true
 		for _, root := range change.Artifacts {
 			carried[root.Digest] = true
-			complete = complete && ev.Roots[root.Digest]
+			complete = complete && (ev.Roots[root.Digest] || !unexpiredRoots[root.Digest])
 		}
 		for _, in := range admitted {
-			if err := st.hold(in); err != nil {
+			if err := st.hold(in, now); err != nil {
 				return false, err
 			}
-			for _, cp := range live(in, now) {
-				r := st.Readiness[cp.ID]
-				switch v, verified := ev.Verified[cp.ID]; {
-				case r.Ready:
-				case !ev.Roots[cp.Root.Digest]:
-					r = Readiness{Missing: []string{MissingClosure}}
-				case verified:
-					r = v
-				default:
-					r = Readiness{Missing: []string{MissingCode}}
-				}
-				st.Readiness[cp.ID] = r
-				complete = complete && (r.Ready || cp.Mixed() || !carried[cp.Root.Digest])
+		}
+		holding := st.carriedHeld(p, now)
+		for _, cp := range holding {
+			r := st.Readiness[cp.ID]
+			switch v, verified := ev.Verified[cp.ID]; {
+			case r.Ready:
+			case !ev.Roots[cp.Root.Digest]:
+				r = Readiness{Missing: []string{MissingClosure}}
+			case verified:
+				r = v
+			default:
+				r = Readiness{Missing: []string{MissingCode}}
 			}
-			st.promote(in.Origin, ev.Roots, now)
+			st.Readiness[cp.ID] = r
+		}
+		for _, in := range p.Origins {
+			if in.Origin != st.Self {
+				st.promote(in.Origin, ev.Roots, now)
+			}
 		}
 		st.pruneReadiness()
+		for _, cp := range holding {
+			complete = complete && (st.Readiness[cp.ID].Ready || !carried[cp.Root.Digest])
+		}
 		if !complete {
 			res = syncservice.ApplyResult{AckedRevision: syncservice.NewRevision(0), Partial: true}
 			if held != nil {
@@ -636,14 +724,19 @@ func (st *state) admit(p Payload) ([]Origin, error) {
 	return admitted, nil
 }
 
-func (st *state) hold(in Origin) error {
+func (st *state) hold(in Origin, now time.Time) error {
 	digest, err := digestJSON(in)
 	if err != nil {
 		return err
 	}
-	if i, found := searchOrigin(st.Origins, in.Origin); found {
+	i, found := searchOrigin(st.Origins, in.Origin)
+	switch disposed := lapsed(in, now); {
+	case disposed && found:
+		st.Origins = slices.Delete(st.Origins, i, i+1)
+	case disposed:
+	case found:
 		st.Origins[i] = in
-	} else {
+	default:
 		st.Origins = slices.Insert(st.Origins, i, in)
 	}
 	f := fence{Origin: in.Origin, Revision: in.Revision, Digest: digest}
@@ -675,6 +768,22 @@ func (st *state) promote(origin string, closure map[artifact.Digest]bool, now ti
 	}
 }
 
+func (st *state) carriedHeld(p Payload, now time.Time) []Checkpoint {
+	held := st.relayedIDs()
+	var out []Checkpoint
+	for _, in := range p.Origins {
+		if in.Origin == st.Self {
+			continue
+		}
+		for _, cp := range live(in, now) {
+			if held[cp.ID] {
+				out = append(out, cp)
+			}
+		}
+	}
+	return out
+}
+
 func (st *state) unready(blocks []Origin, now time.Time) []Checkpoint {
 	var out []Checkpoint
 	for _, o := range blocks {
@@ -696,16 +805,38 @@ func (st *state) exportable() Payload {
 	return Payload{Identity: Identity, Version: Version, Exporter: st.Self, Origins: origins}
 }
 
-func exportDigests(p Payload, now time.Time) (body, roots string, err error) {
+func exportDigests(p Payload, now time.Time) (body, roots string, refs []artifact.Ref, err error) {
 	if body, err = digestJSON(p.Origins); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	refs, err := rootsAt(p.Origins, now)
-	if err != nil {
-		return "", "", err
+	if refs, err = rootsAt(p.Origins, now); err != nil {
+		return "", "", nil, err
 	}
 	roots, err = digestJSON(refs)
-	return body, roots, err
+	return body, roots, refs, err
+}
+
+func (st *state) carriedSince(refs []artifact.Ref, now time.Time) map[string]uint64 {
+	carried := make(map[string]uint64)
+	own, ok := st.block(st.Self)
+	if !ok {
+		return carried
+	}
+	roots := make(map[artifact.Digest]bool, len(refs))
+	for _, r := range refs {
+		roots[r.Digest] = true
+	}
+	for _, cp := range live(*own, now) {
+		if !roots[cp.Root.Digest] {
+			continue
+		}
+		since, ok := st.Carried[cp.ID]
+		if !ok {
+			since = st.Export.Revision
+		}
+		carried[cp.ID] = since
+	}
+	return carried
 }
 
 func (st *state) relayedIDs() map[string]bool {
@@ -746,7 +877,7 @@ func (st *state) ready(now time.Time) int {
 	n := 0
 	for _, o := range st.Origins {
 		for _, cp := range live(o, now) {
-			if !cp.Mixed() && (o.Origin == st.Self || st.Readiness[cp.ID].Ready) {
+			if cp.Complete() && (o.Origin == st.Self || st.Readiness[cp.ID].Ready) {
 				n++
 			}
 		}

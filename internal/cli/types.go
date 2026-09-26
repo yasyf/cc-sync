@@ -349,7 +349,7 @@ type Checkpoint struct {
 }
 
 // Completeness is a checkpoint's local readiness; Ready is never true while
-// anything required is missing, partial, or omitted. Deferred code carries the
+// anything required is missing, partial, or deferred. Deferred code carries the
 // most recent complete code snapshot, captured at CodeCapturedAt, which may be
 // older than the checkpoint's sessions; CodeCapturedAt is nil when the
 // checkpoint carries no code snapshot.
@@ -416,12 +416,30 @@ type CheckpointDetail struct {
 	Deferred   Array[string] `json:"deferred"`
 }
 
-// Delivery is the delivery state toward one peer.
+// Delivery is the delivery state toward one peer. Assurance, reported only
+// for this host's own checkpoints, is what the peer's acknowledgment
+// establishes about the inspected checkpoint.
 type Delivery struct {
-	Peer  string        `json:"peer"`
-	State DeliveryState `json:"state"`
-	Pause *Pause        `json:"pause"`
+	Peer      string        `json:"peer"`
+	State     DeliveryState `json:"state"`
+	Pause     *Pause        `json:"pause"`
+	Assurance Assurance     `json:"assurance,omitempty"`
 }
+
+// Assurance is what a peer's acknowledgment establishes about a checkpoint
+// this host captured: AssuranceDurable for a complete recovery point the peer
+// holds, AssuranceHeld for a mixed or incomplete one it holds, and
+// AssuranceNone before it acknowledges one or once the checkpoint expires by
+// this host's clock. A peer's clock may run ahead, so assurance near expiry
+// is only as good as the clocks agree.
+type Assurance string
+
+// Assurance values.
+const (
+	AssuranceNone    Assurance = ""
+	AssuranceHeld    Assurance = "held"
+	AssuranceDurable Assurance = "durable"
+)
 
 // InspectResult is the payload of `cc-sync inspect`.
 type InspectResult struct {

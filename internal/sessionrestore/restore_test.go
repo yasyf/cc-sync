@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -490,43 +493,209 @@ func TestDivergentFork(t *testing.T) {
 	}
 }
 
+var errInjected = errors.New("injected rename failure")
+
+func changedPaths(before, after map[string]string) []string {
+	var out []string
+	for p, v := range before {
+		if got, ok := after[p]; !ok || got != v {
+			out = append(out, p)
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+type faults struct {
+	at    []int
+	calls int
+	fired int
+}
+
+func (f *faults) rename(from, to string) error {
+	f.calls++
+	if slices.Contains(f.at, f.calls-1) {
+		f.fired++
+		return errInjected
+	}
+	return os.Rename(from, to)
+}
+
+func (f *faults) check(t *testing.T, err error) {
+	t.Helper()
+	if f.fired == 0 && err != nil || f.fired > 0 && !errors.Is(err, errInjected) {
+		t.Fatalf("faults at renames %v: %d fired, error %v", f.at, f.fired, err)
+	}
+}
+
+func (w *world) roots() []string {
+	return []string{w.target.Layout.ConfigDir, w.target.Layout.TmpRoot, w.opts().DisplacedRoot}
+}
+
+func (w *world) reset(snap map[string]string) {
+	w.t.Helper()
+	for _, root := range w.roots() {
+		if err := os.RemoveAll(root); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+	for _, p := range slices.Sorted(maps.Keys(snap)) {
+		var err error
+		switch v := snap[p]; {
+		case v == "dir":
+			err = os.MkdirAll(p, 0o700)
+		case strings.HasPrefix(v, "link:"):
+			err = os.Symlink(strings.TrimPrefix(v, "link:"), p)
+		default:
+			err = os.WriteFile(p, []byte(v), 0o600)
+		}
+		if err != nil {
+			w.t.Fatal(err)
+		}
+	}
+}
+
+func (w *world) recover(ctx context.Context, a applier) {
+	w.t.Helper()
+	if err := a.recover(ctx, w.target.Layout); err != nil {
+		w.t.Fatalf("recover() = %v", err)
+	}
+}
+
+func (w *world) journals() []*journal {
+	w.t.Helper()
+	paths, err := filepath.Glob(filepath.Join(w.target.Layout.ConfigDir, stagingDirName, "*", journalName))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	out := make([]*journal, 0, len(paths))
+	for _, p := range paths {
+		j, err := readJournal(p)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
 func TestApplyRollsBack(t *testing.T) {
-	errInjected := errors.New("injected rename failure")
-	for _, crash := range []bool{false, true} {
-		for failAt := 0; ; failAt++ {
+	ctx := context.Background()
+	clean := applier{rename: os.Rename}
+	tests := []struct {
+		name string
+		run  func(t *testing.T, w *world, p Plan, commit int, settled func(stage string)) (crashed bool)
+	}{
+		{"apply rolls back", func(t *testing.T, _ *world, p Plan, commit int, _ func(string)) bool {
+			f := &faults{at: []int{commit}}
+			_, err := applier{rename: f.rename}.apply(ctx, p, true)
+			f.check(t, err)
+			return f.fired > 0
+		}},
+		{"apply keeps staging when its rollback fails", func(t *testing.T, w *world, p Plan, commit int, _ func(string)) bool {
+			f := &faults{at: []int{commit, commit + 1}}
+			_, err := applier{rename: f.rename}.apply(ctx, p, true)
+			f.check(t, err)
+			if f.fired == 1 && commit > 0 {
+				t.Fatalf("commit %d: the rollback renamed nothing", commit)
+			}
+			if f.fired == 2 && len(w.journals()) != 1 {
+				t.Fatalf("commit %d: apply dropped its journal after a failed rollback", commit)
+			}
+			w.recover(ctx, clean)
+			return f.fired > 0
+		}},
+		{"recover after crash", func(t *testing.T, w *world, p Plan, commit int, _ func(string)) bool {
+			f := &faults{at: []int{commit}}
+			_, err := applier{rename: f.rename}.apply(ctx, p, false)
+			f.check(t, err)
+			w.recover(ctx, clean)
+			return f.fired > 0
+		}},
+		{"recover keeps staging when its rollback fails", func(t *testing.T, w *world, p Plan, commit int, settled func(string)) bool {
+			f := &faults{at: []int{commit}}
+			_, err := applier{rename: f.rename}.apply(ctx, p, false)
+			f.check(t, err)
+			if f.fired == 0 {
+				return false
+			}
+			crash := snapshot(t, w.roots()...)
+			for undo := 0; ; undo++ {
+				g := &faults{at: []int{undo}}
+				g.check(t, applier{rename: g.rename}.recover(ctx, w.target.Layout))
+				if g.fired == 0 {
+					if undo == 0 && commit > 0 {
+						t.Fatalf("commit %d: the rollback renamed nothing", commit)
+					}
+					return true
+				}
+				if len(w.journals()) != 1 {
+					t.Fatalf("commit %d undo %d: recover dropped its journal after a failed rollback", commit, undo)
+				}
+				w.recover(ctx, clean)
+				settled(fmt.Sprintf("undo %d", undo))
+				w.reset(crash)
+			}
+		}},
+		{"recover restarts after a rollback that crashed before cleanup", func(t *testing.T, w *world, p Plan, commit int, _ func(string)) bool {
+			f := &faults{at: []int{commit}}
+			_, err := applier{rename: f.rename}.apply(ctx, p, false)
+			f.check(t, err)
+			for _, j := range w.journals() {
+				if err := j.rollback(os.Rename); err != nil {
+					t.Fatalf("commit %d: rollback() = %v", commit, err)
+				}
+			}
+			w.recover(ctx, clean)
+			return f.fired > 0
+		}},
+	}
+	worlds := []struct {
+		name    string
+		renames int
+		build   func(t *testing.T) (*world, Plan)
+	}{
+		{"fast-forward", 12, func(t *testing.T) (*world, Plan) {
 			w := newWorld(t)
 			w.transcript(sourceLines[:5])
 			w.apply(w.prepare(w.opts()))
 			w.transcript(sourceLines)
-			p := w.prepare(w.opts())
-			roots := []string{w.target.Layout.ConfigDir, w.target.Layout.TmpRoot}
-			before := snapshot(t, roots...)
-			calls := 0
-			rename := func(from, to string) error {
-				calls++
-				if calls-1 == failAt {
-					return errInjected
+			return w, w.prepare(w.opts())
+		}},
+		{"replace", 12, func(t *testing.T) (*world, Plan) {
+			w, _ := divergedWorld(t)
+			opts := w.opts()
+			opts.OnDivergence = DivergenceReplace
+			return w, w.prepare(opts)
+		}},
+	}
+	for _, tt := range tests {
+		for _, wt := range worlds {
+			t.Run(tt.name+"/"+wt.name, func(t *testing.T) {
+				t.Parallel()
+				w, p := wt.build(t)
+				before := snapshot(t, w.roots()...)
+				for commit := range wt.renames + 1 {
+					settled := func(stage string) {
+						t.Helper()
+						if changed := changedPaths(before, snapshot(t, w.roots()...)); len(changed) != 0 {
+							t.Fatalf("commit %d %s: native state changed at %v", commit, stage, changed)
+						}
+					}
+					crashed := tt.run(t, w, p, commit, settled)
+					if crashed != (commit < wt.renames) {
+						t.Fatalf("a fault at rename %d crashed apply = %v, want %d commit renames", commit, crashed, wt.renames)
+					}
+					if crashed {
+						settled("recovered")
+					}
 				}
-				return os.Rename(from, to)
-			}
-			_, err := applier{rename: rename}.apply(context.Background(), p, !crash)
-			if err == nil {
-				if failAt < 2 {
-					t.Fatalf("apply succeeded after only %d renames", failAt)
-				}
-				break
-			}
-			if !errors.Is(err, errInjected) {
-				t.Fatalf("crash=%v failAt=%d: apply() = %v", crash, failAt, err)
-			}
-			if crash {
-				if err := Recover(context.Background(), w.target.Layout); err != nil {
-					t.Fatalf("Recover() = %v", err)
-				}
-			}
-			if after := snapshot(t, roots...); !reflect.DeepEqual(after, before) {
-				t.Errorf("crash=%v failAt=%d: native state changed:\nbefore %v\nafter  %v", crash, failAt, before, after)
-			}
+			})
 		}
 	}
 }

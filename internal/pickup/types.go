@@ -160,8 +160,9 @@ type Result struct {
 	Orca       *OrcaResult `json:"orca"`
 }
 
-// Checkpoint is the checkpoint pickup restored. Partial marks a mixed
-// checkpoint whose code is older than its sessions; CodeDeferred says why.
+// Checkpoint is the checkpoint pickup restored. Partial marks a checkpoint
+// that is not a complete recovery point; CodeDeferred says why a mixed one's
+// code is older than its sessions.
 type Checkpoint struct {
 	ID           string    `json:"id"`
 	CapturedAt   time.Time `json:"captured_at"`

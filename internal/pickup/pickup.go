@@ -64,8 +64,8 @@ type Config struct {
 // Request is one pickup. Resume names the sessions to resume (full ids or
 // unique prefixes); empty resumes the session a session target named, else
 // the checkpoint's most recent human session. AllowPartial admits an
-// explicitly selected mixed checkpoint; ApplySparse keeps a sparse source's
-// recovery checkout sparse.
+// explicitly selected checkpoint held ready here but not a complete recovery
+// point; ApplySparse keeps a sparse source's recovery checkout sparse.
 type Request struct {
 	Target       cli.Target
 	Checkpoint   cli.CheckpointSelector
@@ -118,9 +118,8 @@ func (p *Pickup) Run(ctx context.Context, req Request) (res Result, err error) {
 		return Result{}, err
 	}
 	cp := r.pick.checkpoint
-	ready := snap.ReadinessOf(r.pick.origin, cp)
-	if restorable := ready.Ready || req.AllowPartial && cp.Mixed() && len(ready.Missing) == 0; !restorable {
-		return Result{}, &NotReadyError{CheckpointID: cp.ID, Missing: ready.Missing}
+	if restorable := snap.PickupReady(r.pick.origin, cp) || req.AllowPartial && snap.HeldReady(r.pick.origin, cp); !restorable {
+		return Result{}, notReady(snap, r.pick.origin, cp)
 	}
 	owner := PinOwnerPrefix + rand.Text()
 	if err := p.cfg.Pinner.Pin(ctx, owner, []artifact.Ref{cp.Root}, PinTTL); err != nil {
@@ -346,7 +345,7 @@ func refusal(err error) (string, bool) {
 func (r *run) result(selected map[claudenative.SessionID]bool) Result {
 	cp := r.pick.checkpoint
 	res := Result{
-		Checkpoint: Checkpoint{ID: cp.ID, CapturedAt: cp.CapturedAt, Partial: cp.Deferred != "", CodeDeferred: cp.Deferred},
+		Checkpoint: Checkpoint{ID: cp.ID, CapturedAt: cp.CapturedAt, Partial: !cp.Complete(), CodeDeferred: cp.Deferred},
 		Checkout: Checkout{
 			Path: r.restored.Path, Branch: r.restored.Branch, Reused: r.restored.Reused,
 			Newer: r.restored.Newer, LFSPending: r.restored.LFSPending,
