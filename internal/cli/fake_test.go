@@ -158,6 +158,7 @@ func fullItem() cli.Item {
 				LiveLocalCollision: true,
 			},
 		},
+		NotRestorable: []cli.NotRestorable{{Agent: "codex", Key: "session_id", ID: "019a2c4e-codex", Reason: "agent-not-supported-v1"}},
 		Checkpoint: cli.Checkpoint{
 			ID:               "c0ffee1234",
 			Tier:             cli.TierLatest,

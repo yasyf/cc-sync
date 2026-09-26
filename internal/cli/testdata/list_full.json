@@ -47,6 +47,14 @@
           "live_local_collision": true
         }
       ],
+      "not_restorable": [
+        {
+          "agent": "codex",
+          "key": "session_id",
+          "id": "019a2c4e-codex",
+          "reason": "agent-not-supported-v1"
+        }
+      ],
       "checkpoint": {
         "id": "c0ffee1234",
         "tier": "latest",
@@ -96,6 +104,7 @@
           "live_local_collision": false
         }
       ],
+      "not_restorable": [],
       "checkpoint": {
         "id": "5eed4a11",
         "tier": "latest",
@@ -132,6 +141,7 @@
         "orca": null
       },
       "sessions": [],
+      "not_restorable": [],
       "checkpoint": {
         "id": "abc123",
         "tier": "daily",

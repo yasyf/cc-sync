@@ -37,8 +37,9 @@ type codeState struct {
 }
 
 type orcaState struct {
-	Descriptor artifact.Ref `json:"descriptor"`
-	Summary    catalog.Orca `json:"summary"`
+	Descriptor artifact.Ref             `json:"descriptor"`
+	Summary    catalog.Orca             `json:"summary"`
+	Omitted    []catalog.OmittedBinding `json:"omitted,omitempty"`
 }
 
 type partialPins struct {

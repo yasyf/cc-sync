@@ -106,6 +106,7 @@ type Checkpoint struct {
 	Code             worktree.Summary `json:"code"`
 	Deferred         string           `json:"deferred,omitempty"`
 	Completeness     Completeness     `json:"completeness"`
+	Omitted          []OmittedBinding `json:"omitted,omitempty"`
 }
 
 // Mixed reports whether cp pairs newer sessions with deferred, older code. A
@@ -121,6 +122,15 @@ type Session struct {
 	LastHumanActivity time.Time `json:"last_human_activity"`
 	Activity          string    `json:"activity"`
 	ClaudeVersion     string    `json:"claude_version,omitempty"`
+}
+
+// OmittedBinding is an agent session Orca bound to the worktree but left out
+// of the checkpoint's descriptor, so pickup cannot restore it.
+type OmittedBinding struct {
+	Agent  string `json:"agent"`
+	Key    string `json:"key"`
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // Completeness reports what a capture referenced but could not archive.

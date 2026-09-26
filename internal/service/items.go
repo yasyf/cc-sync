@@ -186,6 +186,7 @@ func (v view) item(origin string, w catalog.Worktree, cp catalog.Checkpoint) (cl
 		Source:          v.source(origin),
 		Workspace:       workspace(w),
 		Sessions:        v.sessions(cp),
+		NotRestorable:   notRestorable(cp),
 		Checkpoint:      *checkpoint(cp),
 		CheckpointCount: len(w.Checkpoints),
 		Completeness:    v.completeness(origin, w, cp),
@@ -250,6 +251,14 @@ func (v view) sessions(cp catalog.Checkpoint) cli.Array[cli.Session] {
 	slices.SortStableFunc(out, func(a, b cli.Session) int {
 		return cmp.Or(timeOf(b.LastActivityAt).Compare(timeOf(a.LastActivityAt)), strings.Compare(a.SessionID, b.SessionID))
 	})
+	return out
+}
+
+func notRestorable(cp catalog.Checkpoint) cli.Array[cli.NotRestorable] {
+	out := make(cli.Array[cli.NotRestorable], len(cp.Omitted))
+	for i, o := range cp.Omitted {
+		out[i] = cli.NotRestorable(o)
+	}
 	return out
 }
 

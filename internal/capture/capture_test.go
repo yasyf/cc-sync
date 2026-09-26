@@ -374,6 +374,34 @@ func TestCaptureOrcaUnavailableKeepsLastDescriptor(t *testing.T) {
 	}
 }
 
+func TestCaptureRecordsOmittedBindings(t *testing.T) {
+	h := newHarness(t)
+	h.orca.descriptor = descriptorOmitting("inst-1", `[{"agent":"codex","key":"session_id","id":"c-1","reason":"agent-not-supported-v1"}]`)
+	h.capture(t)
+	want := []catalog.OmittedBinding{{Agent: "codex", Key: "session_id", ID: "c-1", Reason: "agent-not-supported-v1"}}
+	if got := h.catalog.last(t).cp.Omitted; !slices.Equal(got, want) {
+		t.Fatalf("omitted = %+v, want %+v", got, want)
+	}
+	h.orca.descriptor = descriptor("inst-1")
+	h.touchSession(t, "u-omit")
+	h.capture(t)
+	if got := h.catalog.last(t).cp.Omitted; got != nil {
+		t.Fatalf("omitted after the binding left = %+v, want none", got)
+	}
+}
+
+func TestCaptureRefusesDescriptorWithoutOmittedBindings(t *testing.T) {
+	h := newHarness(t)
+	h.orca.descriptor = `{"version":1,"workspace":{"worktreeId":"w1","instanceId":"inst-1","path":"/src/r","branch":"feat"}}`
+	_, err := h.job.Capture(context.Background(), scheduler.Unit{WorktreeID: wtID, MetaStamp: h.meta})
+	if r, ok := errors.AsType[*orcabridge.RefusedError](err); !ok || r.Code != orcabridge.CodeDescriptorInvalid {
+		t.Fatalf("Capture error = %v, want %s", err, orcabridge.CodeDescriptorInvalid)
+	}
+	if len(h.catalog.records) != 0 {
+		t.Fatalf("invalid descriptor recorded %d checkpoints", len(h.catalog.records))
+	}
+}
+
 func TestCaptureRefusesRootOverClosureBound(t *testing.T) {
 	h := newHarness(t)
 	h.job.cfg.Bound = artifact.ClosureBound{MaxObjects: 3, MaxDepth: 32, MaxBytes: 1 << 30}

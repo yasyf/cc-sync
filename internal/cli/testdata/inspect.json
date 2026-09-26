@@ -40,6 +40,14 @@
       "live_local_collision": true
     }
   ],
+  "not_restorable": [
+    {
+      "agent": "codex",
+      "key": "session_id",
+      "id": "019a2c4e-codex",
+      "reason": "agent-not-supported-v1"
+    }
+  ],
   "checkpoint": {
     "id": "c0ffee1234",
     "tier": "latest",

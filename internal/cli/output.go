@@ -234,6 +234,9 @@ func renderList(p *printer, res ListResult) {
 		if item.NewerPartial != nil {
 			state += "; " + formatNewerPartial(item.NewerPartial)
 		}
+		if n := len(item.NotRestorable); n > 0 {
+			state += fmt.Sprintf("; %d not restorable", n)
+		}
 		if item.Pause != nil {
 			state += "; " + formatPause(item.Pause)
 		}
@@ -255,6 +258,9 @@ func renderInspect(p *printer, res InspectResult) {
 	}
 	for _, s := range res.Sessions {
 		p.printf("session %s: %s [%s]\n", s.SessionID, s.Title, s.Activity)
+	}
+	for _, n := range res.NotRestorable {
+		p.printf("not restorable: %s session %s (%s)\n", n.Agent, n.ID, n.Reason)
 	}
 	rows := make([][]string, 0, 1+len(res.Checkpoints))
 	rows = append(rows, []string{"CHECKPOINT", "TIER", "CAPTURED", "READY", "MISSING", "DEFERRED"})

@@ -331,6 +331,15 @@ type Session struct {
 	LiveLocalCollision  bool     `json:"live_local_collision"`
 }
 
+// NotRestorable is an agent session Orca bound to the workspace that pickup
+// cannot restore; Reason is Orca's, e.g. agent-not-supported-v1.
+type NotRestorable struct {
+	Agent  string `json:"agent"`
+	Key    string `json:"key"`
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 // Checkpoint identifies one captured checkpoint.
 type Checkpoint struct {
 	ID               string `json:"id"`
@@ -373,15 +382,16 @@ type LocalCheckout struct {
 // Item is one recoverable worktree and its chosen checkpoint. Its selector is
 // derived from Source.HostID and Workspace.ID when encoded.
 type Item struct {
-	Source          Source             `json:"source"`
-	Workspace       Workspace          `json:"workspace"`
-	Sessions        Array[Session]     `json:"sessions"`
-	Checkpoint      Checkpoint         `json:"checkpoint"`
-	CheckpointCount int                `json:"checkpoint_count"`
-	Completeness    Completeness       `json:"completeness"`
-	NewerPartial    *PartialCheckpoint `json:"newer_partial"`
-	Pause           *Pause             `json:"pause"`
-	LocalCheckout   *LocalCheckout     `json:"local_checkout"`
+	Source          Source               `json:"source"`
+	Workspace       Workspace            `json:"workspace"`
+	Sessions        Array[Session]       `json:"sessions"`
+	NotRestorable   Array[NotRestorable] `json:"not_restorable"`
+	Checkpoint      Checkpoint           `json:"checkpoint"`
+	CheckpointCount int                  `json:"checkpoint_count"`
+	Completeness    Completeness         `json:"completeness"`
+	NewerPartial    *PartialCheckpoint   `json:"newer_partial"`
+	Pause           *Pause               `json:"pause"`
+	LocalCheckout   *LocalCheckout       `json:"local_checkout"`
 }
 
 // Ref is the item's stable selector.

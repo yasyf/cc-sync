@@ -1,4 +1,4 @@
 SELECTOR          SOURCE               REPO      BRANCH        SESSIONS  CAPTURED              CODE                                STATE
-host-mbp/wt-7f3a  Yasyf's MacBook Pro  monorepo  feature/sync  2         2026-09-26T19:00:00Z  complete from 2026-09-26T19:00:00Z  ready
+host-mbp/wt-7f3a  Yasyf's MacBook Pro  monorepo  feature/sync  2         2026-09-26T19:00:00Z  complete from 2026-09-26T19:00:00Z  ready; 1 not restorable
 host-mbp/wt-9c1d  mbp                  assets    main          1         2026-09-26T19:05:00Z  deferred from 2026-09-26T17:30:00Z  ready
 host-mini/wt-01   mini                 scratch   (detached)    0         2026-09-26T16:00:00Z  missing                             missing lfs:assets/model.bin, submodule:vendor/lib; paused: cellular (peer) since 2026-09-26T18:00:00Z

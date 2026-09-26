@@ -17,6 +17,7 @@
     "orca": null
   },
   "sessions": [],
+  "not_restorable": [],
   "checkpoint": {
     "id": "abc123",
     "tier": "daily",

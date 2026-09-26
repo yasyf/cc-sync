@@ -403,11 +403,18 @@ func (j *Job) orca(ctx context.Context, wt worktree.Worktree, st *state, now tim
 	if err != nil {
 		return err
 	}
+	omitted, err := orcabridge.Omitted(descriptor)
+	if err != nil {
+		return fmt.Errorf("orca descriptor of %s: %w", wt.Root, err)
+	}
 	ref, err := j.cfg.Store.Put(ctx, bytes.NewReader(descriptor), orcabridge.MediaDescriptor)
 	if err != nil {
 		return fmt.Errorf("store orca descriptor of %s: %w", wt.Root, err)
 	}
 	st.Orca = &orcaState{Descriptor: ref, Summary: summary}
+	for _, o := range omitted {
+		st.Orca.Omitted = append(st.Orca.Omitted, catalog.OmittedBinding(o))
+	}
 	return nil
 }
 
@@ -464,6 +471,9 @@ func (j *Job) checkpoint(t inventory.Target, st state, code codeResult, root art
 	cp := catalog.Checkpoint{Root: root, CapturedAt: now, Deferred: code.state}
 	if st.Code != nil {
 		cp.Code = st.Code.Summary
+	}
+	if st.Orca != nil {
+		cp.Omitted = st.Orca.Omitted
 	}
 	missing := code.named
 	complete := code.complete()

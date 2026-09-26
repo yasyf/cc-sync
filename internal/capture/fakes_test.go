@@ -301,7 +301,11 @@ func oid(c byte) string {
 }
 
 func descriptor(instance string) string {
-	return `{"version":1,"workspace":{"worktreeId":"w1","instanceId":"` + instance + `","path":"/src/r","branch":"feat","meta":{"displayName":"Feature"}}}`
+	return descriptorOmitting(instance, `[]`)
+}
+
+func descriptorOmitting(instance, omitted string) string {
+	return `{"version":1,"workspace":{"worktreeId":"w1","instanceId":"` + instance + `","path":"/src/r","branch":"feat","meta":{"displayName":"Feature"}},"omittedBindings":` + omitted + `}`
 }
 
 func transcriptRecord(uuid string, at time.Time) string {

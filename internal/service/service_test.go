@@ -76,6 +76,7 @@ func fixture() catalog.Snapshot {
 		session(sBound, "Refactor picker", "idle", at(18, 0), at(17, 0)),
 		session(sHuman, "Wire the service", "human", at(19, 29), at(19, 29)),
 		session(sLive, "Tail logs", "autonomous", at(19, 20), time.Time{}))
+	complete.Omitted = []catalog.OmittedBinding{{Agent: "codex", Key: "session_id", ID: "019a2c4e-codex", Reason: "agent-not-supported-v1"}}
 	hourly := cp("aaa100", catalog.ClassHourly, at(18, 30), "", session(sBound, "Refactor picker", "idle", at(18, 0), at(17, 0)))
 	lib := cp("bbb100", catalog.ClassLatest, at(17, 0), "", session(sLib, "", "idle", at(16, 0), time.Time{}))
 	lib.Completeness = catalog.Completeness{Missing: []string{"paste-cache/abc"}}
