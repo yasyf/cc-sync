@@ -109,10 +109,16 @@ type Checkpoint struct {
 	Omitted          []OmittedBinding `json:"omitted,omitempty"`
 }
 
-// Mixed reports whether cp pairs newer sessions with deferred, older code. A
-// mixed checkpoint is retained but never ready, never counts toward ACK
-// assurance, and is never the default pick-up target.
+// Mixed reports whether cp pairs newer sessions with deferred, older code.
 func (cp Checkpoint) Mixed() bool { return cp.Deferred != "" }
+
+// Complete reports whether cp is a complete recovery point: its code is not
+// deferred, every session artifact it references was archived, and Orca
+// omitted no binding. Only complete checkpoints claim retention tiers, count
+// as pick-up ready, or are reported durable on a peer.
+func (cp Checkpoint) Complete() bool {
+	return !cp.Mixed() && cp.Completeness.Complete && len(cp.Omitted) == 0
+}
 
 // Session summarizes one Claude session archived in a checkpoint.
 type Session struct {

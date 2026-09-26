@@ -1,8 +1,8 @@
 // Package consumer serves cc-sync's checkpoint catalog to synckit as an
 // artifact consumer: one stamp watch item, snapshot exports that carry this
 // host's block and every artifact-complete relayed block verbatim, and
-// fenced applies that acknowledge a change only once every checkpoint in it
-// is ready on this host.
+// fenced applies that acknowledge a change only once this host holds ready
+// every unexpired checkpoint it carries.
 package consumer
 
 import (
@@ -172,8 +172,9 @@ func (c *Consumer) ExportArtifacts(ctx context.Context, request syncservice.Expo
 // checkpoint it would newly hold whose root closure is complete has its code
 // verified without an origin fetch; one missing prerequisites records
 // catalog.MissingPrerequisites for VerifyDeferred. The result acknowledges
-// the change only when every checkpoint in it is ready here; otherwise it is
-// Partial with the prior receipt.
+// the change as processed only when every unexpired checkpoint it carries is
+// held ready here, including when expiry disposed of all of them; otherwise
+// it is Partial with the prior receipt.
 func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.ChangeEnvelope, ready []artifact.Ref) (syncservice.ApplyResult, error) {
 	if change.ServiceID != ServiceID || change.SchemaFingerprint != Fingerprint {
 		return syncservice.ApplyResult{}, fmt.Errorf("%w: %s %s", ErrSchema, change.ServiceID, change.SchemaFingerprint)
