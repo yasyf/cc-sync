@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/cc-sync/internal/version"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/syncservice"
@@ -391,6 +393,137 @@ func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 			cancel()
 			if err := <-done; !errors.Is(err, context.Canceled) {
 				t.Errorf("verifyLoop = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+type hookedArtifacts struct {
+	*fakeStore
+	complete func()
+}
+
+func (a hookedArtifacts) Complete(context.Context, []artifact.Ref) (int, error) {
+	a.complete()
+	return 0, nil
+}
+
+type hookedPublisher func()
+
+func (p hookedPublisher) Publish(context.Context) error {
+	p()
+	return nil
+}
+
+type fetchingVerifier struct{ admissions *atomic.Int32 }
+
+func (v fetchingVerifier) VerifyCode(ctx context.Context, _ artifact.Ref, fetchOrigin worktree.FetchGate) (consumer.CodeVerdict, error) {
+	if fetchOrigin == nil {
+		return consumer.CodeVerdict{Missing: []string{"trunk"}}, nil
+	}
+	err := fetchOrigin(ctx, func(context.Context) error {
+		v.admissions.Add(1)
+		return nil
+	})
+	switch {
+	case errors.Is(err, worktree.ErrFetchDeferred):
+		return consumer.CodeVerdict{Missing: []string{"trunk"}}, nil
+	case err != nil:
+		return consumer.CodeVerdict{}, err
+	}
+	return consumer.CodeVerdict{Ready: true}, nil
+}
+
+func relayPending(t *testing.T, dir string, now func() time.Time, to *consumer.Consumer) {
+	t.Helper()
+	peerCatalog := catalog.New(filepath.Join(dir, "peer-catalog.json"), "peer@host", now)
+	cp := catalog.Checkpoint{
+		Root:       artifact.Ref{Digest: artifact.Sum([]byte("r1")), Kind: artifact.KindManifest, Size: 100},
+		CapturedAt: now(), SourceActivityAt: now(), Completeness: catalog.Completeness{Complete: true},
+	}
+	wt := catalog.Worktree{ID: "wt1", Repo: catalog.Repo{Origin: "git@github.com:me/wt1.git", SourcePath: "/src/wt1"}}
+	if _, err := peerCatalog.Record(t.Context(), wt, cp); err != nil {
+		t.Fatal(err)
+	}
+	peer := consumer.New(consumer.Config{Catalog: peerCatalog})
+	change, err := peer.ExportArtifacts(t.Context(), syncservice.ExportRequest{ServiceID: consumer.ServiceID, SchemaFingerprint: consumer.Fingerprint, SinceRevision: "0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change, err = syncservice.BindDelivery(change, "peer@host"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := to.ApplyArtifacts(t.Context(), change, change.Artifacts); err != nil || !res.Partial {
+		t.Fatalf("apply = %+v, %v; want Partial", res, err)
+	}
+}
+
+func TestVerifyLoopResumesAfterConsumerDefersFetch(t *testing.T) {
+	tests := []struct {
+		name string
+		held bool
+	}{
+		{"restriction cleared before the pass ends", false},
+		{"restriction held past the poll", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+			now := func() time.Time { return at }
+			monitor := newFakeMonitor(unrestricted)
+			var metered atomic.Bool
+			passed := make(chan struct{})
+			var pass sync.Once
+			var admissions atomic.Int32
+			me := consumer.New(consumer.Config{
+				Catalog: catalog.New(filepath.Join(dir, "catalog.json"), "me@host", now),
+				Publisher: hookedPublisher(func() {
+					if !metered.Load() {
+						return
+					}
+					if !tt.held {
+						monitor.meter(false)
+					}
+					pass.Do(func() { close(passed) })
+				}),
+				Artifacts: hookedArtifacts{fakeStore: newFakeStore(), complete: func() {
+					if metered.CompareAndSwap(false, true) {
+						monitor.awaitReads(3)
+						monitor.meter(true)
+					}
+				}},
+				Verifier: fetchingVerifier{admissions: &admissions},
+				Network:  monitor,
+				StampDir: dir,
+			})
+			relayPending(t, dir, now, me)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- verifyLoop(ctx, monitor, time.Hour, make(chan struct{}), me.VerifyDeferred) }()
+
+			<-passed
+			if n := admissions.Load(); n != 0 {
+				t.Fatalf("admissions = %d after the restricted pass, want 0", n)
+			}
+			if tt.held {
+				time.Sleep(netgate.Poll + 200*time.Millisecond)
+				monitor.meter(false)
+			}
+			deadline := time.After(netgate.Poll + 2*time.Second)
+			for admissions.Load() == 0 {
+				select {
+				case <-deadline:
+					t.Fatalf("admissions=%d: deferred fetch did not resume within %v of the restriction clearing", admissions.Load(), netgate.Poll+2*time.Second)
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Errorf("verifyLoop = %v, want context.Canceled", err)
+			}
+			if n := admissions.Load(); n != 1 {
+				t.Errorf("admissions = %d, want 1", n)
 			}
 		})
 	}

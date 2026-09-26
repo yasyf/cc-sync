@@ -92,7 +92,7 @@ func (s targets) Target(id string) (inventory.Target, bool) {
 
 type ready struct{}
 
-func (ready) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
+func (ready) VerifyCode(context.Context, artifact.Ref, worktree.FetchGate) (consumer.CodeVerdict, error) {
 	return consumer.CodeVerdict{Ready: true}, nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/replica"
 	"github.com/yasyf/cc-sync/internal/sessionarchive"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 )
 
@@ -89,7 +90,7 @@ func (p *fakePinner) Pin(_ context.Context, owner string, roots []artifact.Ref, 
 
 type fakeVerifier struct{ verdict consumer.CodeVerdict }
 
-func (v fakeVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
+func (v fakeVerifier) VerifyCode(context.Context, artifact.Ref, worktree.FetchGate) (consumer.CodeVerdict, error) {
 	return v.verdict, nil
 }
 

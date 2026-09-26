@@ -190,7 +190,7 @@ func (r *run) open(ctx context.Context) (rootParts, error) {
 	if missing > 0 {
 		return rootParts{}, &NotReadyError{CheckpointID: cp.ID, Missing: []string{strconv.Itoa(missing) + " artifacts"}}
 	}
-	verdict, err := r.cfg.Verifier.VerifyCode(ctx, cp.Root, false)
+	verdict, err := r.cfg.Verifier.VerifyCode(ctx, cp.Root, nil)
 	if err != nil {
 		return rootParts{}, fmt.Errorf("verify checkpoint %s code: %w", cp.ID, err)
 	}

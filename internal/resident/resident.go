@@ -202,12 +202,12 @@ func Prepare[S Store](ctx context.Context, d *rpc.Dispatcher, deps Deps[S], stop
 	}
 	svc := &service{
 		Consumer: consumer.New(consumer.Config{
-			Catalog:      cat,
-			Publisher:    publisher,
-			Artifacts:    store,
-			Verifier:     pipeline.Verifier,
-			FetchAllowed: func() bool { return bulkAllowed(monitor) },
-			StampDir:     layout.StampDir,
+			Catalog:   cat,
+			Publisher: publisher,
+			Artifacts: store,
+			Verifier:  pipeline.Verifier,
+			Network:   monitor,
+			StampDir:  layout.StampDir,
 		}),
 		pins: &pins{path: layout.PinsPath, store: store, now: deps.Now},
 	}
@@ -292,11 +292,6 @@ func (s *service) ApplyArtifacts(ctx context.Context, change syncservice.ChangeE
 		s.nudge()
 	}
 	return result, err
-}
-
-func bulkAllowed(monitor netpolicy.Monitor) bool {
-	state, _ := monitor.Current()
-	return state.Unrestricted()
 }
 
 func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Duration, nudges <-chan struct{}, verify func(context.Context) error) error {

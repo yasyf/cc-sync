@@ -16,6 +16,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/scheduler"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/rpc"
@@ -148,7 +149,7 @@ func (fakeCapturer) Capture(_ context.Context, u scheduler.Unit) (scheduler.Resu
 
 type fakeVerifier struct{}
 
-func (fakeVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
+func (fakeVerifier) VerifyCode(context.Context, artifact.Ref, worktree.FetchGate) (consumer.CodeVerdict, error) {
 	return consumer.CodeVerdict{Ready: true}, nil
 }
 

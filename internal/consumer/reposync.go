@@ -22,7 +22,7 @@ type Reposync struct {
 }
 
 // VerifyCode verifies the code group under the checkpoint root.
-func (r Reposync) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin bool) (CodeVerdict, error) {
+func (r Reposync) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin worktree.FetchGate) (CodeVerdict, error) {
 	code, ok, err := codeGroup(ctx, r.Store, root)
 	if err != nil {
 		return CodeVerdict{}, err

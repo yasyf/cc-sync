@@ -13,9 +13,13 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/yasyf/reposync/worktree"
+
 	"github.com/yasyf/cc-sync/internal/catalog"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/syncservice"
 )
 
@@ -68,9 +72,10 @@ type CodeVerdict struct {
 }
 
 // CodeVerifier checks a checkpoint's code snapshot against this host's
-// checkouts, fetching the origin trunk only when fetchOrigin allows it.
+// checkouts, fetching the origin trunk only through the fetchOrigin gate; nil
+// never fetches.
 type CodeVerifier interface {
-	VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin bool) (CodeVerdict, error)
+	VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin worktree.FetchGate) (CodeVerdict, error)
 }
 
 // Publisher announces catalog changes through the stamp.
@@ -78,16 +83,17 @@ type Publisher interface {
 	Publish(ctx context.Context) error
 }
 
-// Config wires a Consumer. FetchAllowed reports whether network policy
-// currently allows a bulk origin fetch; only VerifyDeferred consults it,
-// immediately before each verification that may fetch.
+// Config wires a Consumer. Network is this host's network monitor: only
+// VerifyDeferred consults it, starting each origin fetch only while Network
+// allows bulk transfer and cancelling the fetch the moment it stops allowing
+// it.
 type Config struct {
-	Catalog      *catalog.Store
-	Publisher    Publisher
-	Artifacts    Artifacts
-	Verifier     CodeVerifier
-	FetchAllowed func() bool
-	StampDir     string
+	Catalog   *catalog.Store
+	Publisher Publisher
+	Artifacts Artifacts
+	Verifier  CodeVerifier
+	Network   netpolicy.Monitor
+	StampDir  string
 }
 
 // Consumer is cc-sync's syncservice.ArtifactConsumer.
@@ -206,7 +212,7 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 	for _, root := range ready {
 		evidence.Roots[root.Digest] = true
 	}
-	if err := c.settle(ctx, pending, evidence, false); err != nil {
+	if _, err := c.settle(ctx, pending, evidence, false); err != nil {
 		return syncservice.ApplyResult{}, err
 	}
 	result, err := c.cfg.Catalog.Apply(ctx, change, payload, evidence)
@@ -219,42 +225,62 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 // VerifyDeferred is the resident's background half of verification, run
 // outside any apply: it re-checks the artifact closure of every held relayed
 // checkpoint not yet ready, relays every held block that is now
-// artifact-complete, and verifies each closure-complete checkpoint with an
-// origin fetch while network policy allows one, re-checking the policy before
-// each. It then publishes, so the next delivery of a waiting change can
-// acknowledge it. A ctx cancelled mid-pass, as when network policy turns
-// restrictive under a fetch, records nothing and leaves every checkpoint
-// deferred as it was.
+// artifact-complete, and verifies each closure-complete checkpoint, fetching
+// the origin trunk through a gate that re-checks network policy immediately
+// before each fetch and cancels it once the policy turns restrictive. It then
+// publishes, so the next delivery of a waiting change can acknowledge it. A
+// fetch the policy refused or interrupted leaves its checkpoint deferred on
+// the prerequisites it still lacks, and VerifyDeferred returns the
+// *netpolicy.PausedError after publishing so the caller retries once the
+// policy allows. A ctx cancelled mid-pass records nothing and leaves every
+// checkpoint deferred as it was.
 func (c *Consumer) VerifyDeferred(ctx context.Context) error {
 	pending, err := c.cfg.Catalog.Pending()
 	if err != nil {
 		return err
 	}
 	evidence := catalog.Evidence{Roots: map[artifact.Digest]bool{}, Verified: map[string]catalog.Readiness{}}
-	if err := c.settle(ctx, pending, evidence, true); err != nil {
+	paused, err := c.settle(ctx, pending, evidence, true)
+	if err != nil {
 		return err
 	}
 	if err := c.cfg.Catalog.Settle(ctx, evidence); err != nil {
 		return err
 	}
-	return c.cfg.Publisher.Publish(ctx)
+	if err := c.cfg.Publisher.Publish(ctx); err != nil {
+		return err
+	}
+	if paused != nil {
+		return paused
+	}
+	return nil
 }
 
-func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evidence catalog.Evidence, background bool) error {
+func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evidence catalog.Evidence, background bool) (paused *netpolicy.PausedError, _ error) {
+	var fetchOrigin worktree.FetchGate
+	if background {
+		fetchOrigin = func(ctx context.Context, fetch func(context.Context) error) error {
+			err := netgate.Run(ctx, c.cfg.Network, fetch)
+			if errors.As(err, &paused) {
+				return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, paused)
+			}
+			return err
+		}
+	}
 	for _, cp := range pending {
 		if !evidence.Roots[cp.Root.Digest] {
 			missing, err := c.cfg.Artifacts.Complete(ctx, []artifact.Ref{cp.Root})
 			if err != nil {
-				return fmt.Errorf("consumer: closure of %s: %w", cp.ID, err)
+				return nil, fmt.Errorf("consumer: closure of %s: %w", cp.ID, err)
 			}
 			evidence.Roots[cp.Root.Digest] = missing == 0
 		}
-		if !evidence.Roots[cp.Root.Digest] || background && !c.cfg.FetchAllowed() {
+		if !evidence.Roots[cp.Root.Digest] {
 			continue
 		}
-		verdict, err := c.cfg.Verifier.VerifyCode(ctx, cp.Root, background)
+		verdict, err := c.cfg.Verifier.VerifyCode(ctx, cp.Root, fetchOrigin)
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+			return nil, ctxErr
 		}
 		switch {
 		case err != nil:
@@ -265,5 +291,5 @@ func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evi
 			evidence.Verified[cp.ID] = catalog.Readiness{Missing: verdict.Missing, Deferred: catalog.MissingPrerequisites}
 		}
 	}
-	return nil
+	return paused, nil
 }

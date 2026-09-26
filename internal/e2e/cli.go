@@ -225,7 +225,7 @@ type codeVerifier struct {
 	reg  registry.Registry
 }
 
-func (v codeVerifier) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin bool) (_ consumer.CodeVerdict, err error) {
+func (v codeVerifier) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin worktree.FetchGate) (_ consumer.CodeVerdict, err error) {
 	store, closeStore, err := v.open()
 	if err != nil {
 		return consumer.CodeVerdict{}, err
