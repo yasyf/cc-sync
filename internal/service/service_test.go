@@ -559,6 +559,7 @@ func TestCheckoutDir(t *testing.T) {
 		"app/laptop-app-20260926-1900",
 		"app/mini-app-20260926-2000/.git",
 		"app/laptop-application-20260926-2100/.git",
+		"app/laptop-app-backup/.git",
 	} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
 			t.Fatal(err)

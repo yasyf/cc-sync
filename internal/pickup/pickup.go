@@ -26,10 +26,15 @@ import (
 	"github.com/yasyf/cc-sync/internal/replica"
 	"github.com/yasyf/cc-sync/internal/sessionarchive"
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // PinTTL bounds a pickup pin, so a crashed pickup never pins forever.
 const PinTTL = 24 * time.Hour
+
+// CheckoutStamp is the time layout of the capture minute ending a default
+// recovery checkout's name.
+const CheckoutStamp = "20060102-1504"
 
 // PinOwnerPrefix prefixes every pickup's pin owner; one pickup's owner is
 // PinOwnerPrefix followed by its operation id.
@@ -195,15 +200,24 @@ func (r *run) open(ctx context.Context) (rootParts, error) {
 	return parts, nil
 }
 
-func (p *Pickup) dest(pk pick) (string, error) {
-	repo := pk.worktree.Repo
-	rel := filepath.Clean(filepath.FromSlash(repo.RelPath))
+// CheckoutLocation places the default recovery checkouts of w picked from
+// origin: each one lives in dir, <root>/<repo relpath>, named prefix followed
+// by its capture minute in the CheckoutStamp layout.
+func CheckoutLocation(root, origin string, w catalog.Worktree) (dir, prefix string, err error) {
+	rel := filepath.Clean(filepath.FromSlash(w.Repo.RelPath))
 	if !filepath.IsLocal(rel) {
-		return "", fmt.Errorf("%w: repo relpath %q", ErrInvalid, repo.RelPath)
+		return "", "", fmt.Errorf("%w: repo relpath %q", ErrInvalid, w.Repo.RelPath)
 	}
-	name := firstNonEmpty(orcaName(pk.worktree), repo.Branch, filepath.Base(repo.SourcePath))
-	stamp := pk.checkpoint.CapturedAt.In(p.cfg.Now().Location()).Format("20060102-1504")
-	return filepath.Join(p.cfg.CheckoutRoot, rel, sanitize(pk.origin)+"-"+sanitize(name)+"-"+stamp), nil
+	name := firstNonEmpty(orcaName(w), w.Repo.Branch, filepath.Base(w.Repo.SourcePath))
+	return filepath.Join(root, rel), sanitize(hostregistry.HostNode(origin)) + "-" + sanitize(name) + "-", nil
+}
+
+func (p *Pickup) dest(pk pick) (string, error) {
+	dir, prefix, err := CheckoutLocation(p.cfg.CheckoutRoot, pk.origin, pk.worktree)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, prefix+pk.checkpoint.CapturedAt.In(p.cfg.Now().Location()).Format(CheckoutStamp)), nil
 }
 
 func orcaName(wt catalog.Worktree) string {

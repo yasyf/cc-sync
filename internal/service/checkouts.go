@@ -7,22 +7,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/cli"
-	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/cc-sync/internal/pickup"
 )
 
-// CheckoutDir finds pickup's default recovery checkouts under Root, named
-// <Root>/<repo relpath>/<source host>-<worktree name>-<YYYYMMDD-HHMM>; the
-// newest one wins and is reusable when it is still a git checkout.
+// CheckoutDir finds pickup's default recovery checkouts under Root, placed by
+// pickup.CheckoutLocation; the newest one wins and is reusable when it is
+// still a git checkout.
 type CheckoutDir struct {
 	Root string
 }
 
 // Find returns the newest recovery checkout of w captured on source.
 func (d CheckoutDir) Find(source string, w catalog.Worktree) (*cli.LocalCheckout, error) {
-	dir := filepath.Join(d.Root, filepath.FromSlash(w.Repo.RelPath))
+	dir, prefix, err := pickup.CheckoutLocation(d.Root, source, w)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -30,10 +34,13 @@ func (d CheckoutDir) Find(source string, w catalog.Worktree) (*cli.LocalCheckout
 	if err != nil {
 		return nil, fmt.Errorf("read checkouts %s: %w", dir, err)
 	}
-	prefix := hostregistry.HostNode(source) + "-" + filepath.Base(w.Repo.SourcePath) + "-"
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+		stamp, ok := strings.CutPrefix(e.Name(), prefix)
+		if !e.IsDir() || !ok {
+			continue
+		}
+		if _, err := time.Parse(pickup.CheckoutStamp, stamp); err != nil {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
