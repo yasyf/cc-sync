@@ -136,7 +136,8 @@ func (s *Service) HelperServe(ctx context.Context) error {
 }
 
 // Status reports the helper, the local network, per-peer delivery, and the
-// capture scheduler.
+// capture scheduler; synckitd being unreachable marks delivery unavailable
+// rather than failing the report.
 func (s *Service) Status(ctx context.Context) (cli.StatusResult, error) {
 	reg, err := s.cfg.Mesh.Load()
 	if err != nil {
@@ -146,17 +147,21 @@ func (s *Service) Status(ctx context.Context) (cli.StatusResult, error) {
 	if err != nil {
 		return cli.StatusResult{}, fmt.Errorf("read network state: %w", err)
 	}
-	statuses, err := s.cfg.Deliveries.Status(ctx, serviceID)
-	if err != nil {
-		return cli.StatusResult{}, classify(fmt.Errorf("delivery status: %w", err))
-	}
 	tiers, err := s.cfg.Tiers()
 	if err != nil {
 		return cli.StatusResult{}, fmt.Errorf("capture tiers: %w", err)
 	}
 	res := cli.StatusResult{
 		Local:     cli.LocalHost{Host: host(reg.Self), Network: network(local)},
+		Delivery:  cli.DeliveryService{Available: true},
 		Scheduler: cli.Scheduler{Tiers: tiers},
+	}
+	statuses, err := s.cfg.Deliveries.Status(ctx, serviceID)
+	switch {
+	case errors.Is(err, ErrUnavailable):
+		res.Delivery = cli.DeliveryService{Reason: new(err.Error())}
+	case err != nil:
+		return cli.StatusResult{}, fmt.Errorf("delivery status: %w", err)
 	}
 	hs, err := s.cfg.Helper.Status(ctx)
 	switch {

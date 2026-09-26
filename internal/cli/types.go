@@ -290,10 +290,18 @@ type Scheduler struct {
 
 // StatusResult is the payload of `cc-sync status`.
 type StatusResult struct {
-	Helper    Helper      `json:"helper"`
-	Local     LocalHost   `json:"local"`
-	Peers     Array[Peer] `json:"peers"`
-	Scheduler Scheduler   `json:"scheduler"`
+	Helper    Helper          `json:"helper"`
+	Local     LocalHost       `json:"local"`
+	Delivery  DeliveryService `json:"delivery"`
+	Peers     Array[Peer]     `json:"peers"`
+	Scheduler Scheduler       `json:"scheduler"`
+}
+
+// DeliveryService is whether synckitd reported per-peer delivery. When it is
+// not Available, Reason says why and every Peer carries only its identity.
+type DeliveryService struct {
+	Available bool    `json:"available"`
+	Reason    *string `json:"reason"`
 }
 
 // Source is the host that captured an item.

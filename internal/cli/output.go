@@ -197,7 +197,14 @@ func renderStatus(p *printer, res StatusResult) {
 	}
 	p.printf("helper: %s (build %s)\n", helper, res.Helper.Build)
 	p.printf("local: %s (%s), network %s\n", res.Local.HostName, res.Local.HostID, formatNetwork(res.Local.Network))
+	if !res.Delivery.Available {
+		p.printf("delivery: %s\n", *res.Delivery.Reason)
+	}
 	for _, peer := range res.Peers {
+		if !res.Delivery.Available {
+			p.printf("peer %s (%s): delivery unknown\n", peer.HostName, peer.HostID)
+			continue
+		}
 		reach := "unreachable"
 		if peer.Reachable {
 			reach = "reachable"

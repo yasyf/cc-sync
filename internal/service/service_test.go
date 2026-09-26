@@ -387,12 +387,31 @@ func TestDegradedDependencies(t *testing.T) {
 			}
 		}
 	}
-	if _, err := New(cfg).Status(context.Background()); cli.Classify(err) != cli.CodeUnavailable {
-		t.Errorf("status without synckitd: code %q, err %v", cli.Classify(err), err)
+	st, err := New(cfg).Status(context.Background())
+	if err != nil {
+		t.Fatalf("status without synckitd: %v", err)
+	}
+	if st.Delivery.Available || st.Delivery.Reason == nil || *st.Delivery.Reason != ErrUnavailable.Error() {
+		t.Errorf("delivery without synckitd: %+v", st.Delivery)
+	}
+	if !st.Helper.Running || st.Local.Network.Status != cli.NetworkConnected || st.Scheduler.Workers != 1 {
+		t.Errorf("status without synckitd dropped the helper, network, or scheduler: %+v %+v %+v", st.Helper, st.Local, st.Scheduler)
+	}
+	if len(st.Peers) != 2 {
+		t.Errorf("peers without synckitd = %+v, want both registered hosts", st.Peers)
+	}
+	for _, p := range st.Peers {
+		if p != (cli.Peer{Host: p.Host}) {
+			t.Errorf("peer %s carries delivery state without synckitd: %+v", p.HostID, p)
+		}
+	}
+	cfg.Deliveries = fakeDeliveries{err: errors.New("synckitd crashed")}
+	if _, err := New(cfg).Status(context.Background()); err == nil || cli.Classify(err) == cli.CodeUnavailable {
+		t.Errorf("status on a delivery failure: code %q, err %v", cli.Classify(err), err)
 	}
 	cfg = newConfig()
 	cfg.Helper = &fakeHelper{err: ErrUnavailable}
-	st, err := New(cfg).Status(context.Background())
+	st, err = New(cfg).Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

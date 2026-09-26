@@ -42,7 +42,6 @@ const (
 	codeword         = "ZEBRA-4127"
 	wipLine          = "WIP-ZEBRA uncommitted edit"
 	reposyncDecl     = "schema:{identity:string,version:uint64,fingerprint:string};host_registry:{self:string,hosts:array<string>,addrs:map<string,array<string>>};repo_sync:{default_location:string,repos:map<string,{added_at:int64,removed_at:int64,value:{relpath:string,trunk:string,local_only:bool,no_env_sync:bool}}>,local_repos:map<string,{added_at:int64,removed_at:int64,value:{relpath:string,trunk:string,local_only:bool,no_env_sync:bool}}>,settings:{idle_threshold:duration,repo_op_timeout:duration,push_after:duration}}"
-	exitUnavailable  = 5
 )
 
 var (
@@ -647,9 +646,15 @@ func TestRealProcessHost(t *testing.T) {
 	}
 	a.register()
 
-	unavailable := a.json(exitUnavailable, "status")
-	if field(t, unavailable, "ok") != false || field(t, unavailable, "error", "code") != "unavailable" {
-		t.Fatalf("status before serve = %v, want the unavailable error", unavailable)
+	degraded := a.json(0, "status")
+	if field(t, degraded, "delivery", "available") != false || field(t, degraded, "helper", "running") != false {
+		t.Fatalf("status before serve = %v, want delivery unavailable and the helper not running", degraded)
+	}
+	if reason, _ := field(t, degraded, "delivery", "reason").(string); !strings.Contains(reason, "synckitd is not running") {
+		t.Fatalf("status before serve delivery.reason = %q, want it to name synckitd not running", reason)
+	}
+	if got := field(t, degraded, "local", "host_id"); got != a.self {
+		t.Fatalf("status before serve local.host_id = %v, want %s", got, a.self)
 	}
 
 	a.start("cc-sync", "helper-serve")
@@ -666,6 +671,9 @@ func TestRealProcessHost(t *testing.T) {
 	}
 	if got := field(t, status, "local", "network", "status"); got == "" {
 		t.Fatalf("status local.network.status is empty")
+	}
+	if field(t, status, "delivery", "available") != true {
+		t.Fatalf("status delivery = %v, want available once synckitd serves", field(t, status, "delivery"))
 	}
 	if peers := field(t, status, "peers").([]any); len(peers) != 0 {
 		t.Fatalf("status peers = %v, want none on an isolated single-host mesh", peers)
@@ -742,11 +750,11 @@ func TestVersionSkewOldSynckitd(t *testing.T) {
 	c.start("synckitd", "serve")
 	c.waitFor("old synckitd serve reports daemon: running", c.serveRunning)
 
-	doc := c.json(exitUnavailable, "status")
-	if field(t, doc, "ok") != false || field(t, doc, "error", "code") != "unavailable" {
-		t.Fatalf("status against an old synckitd = %v, want the typed unavailable error", doc)
+	doc := c.json(0, "status")
+	if field(t, doc, "delivery", "available") != false {
+		t.Fatalf("status against an old synckitd = %v, want delivery unavailable", doc)
 	}
-	if msg, _ := field(t, doc, "error", "message").(string); !strings.Contains(msg, "synckitd too old") {
-		t.Fatalf("status error message = %q, want it to name synckitd too old", msg)
+	if reason, _ := field(t, doc, "delivery", "reason").(string); !strings.Contains(reason, "synckitd too old") {
+		t.Fatalf("status delivery.reason = %q, want it to name synckitd too old", reason)
 	}
 }
