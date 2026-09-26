@@ -42,11 +42,18 @@ func NewMesh(t *testing.T, clock *Clock) *Mesh {
 	return &Mesh{Clock: clock, t: t, hosts: map[string]*Host{}, links: map[[2]string]*Link{}}
 }
 
-// Add boots a host with clones of origins and makes every host a peer of
-// every other.
+// Add boots a host on the mesh clock with clones of origins and makes every
+// host a peer of every other.
 func (m *Mesh) Add(name string, origins ...*Origin) *Host {
 	m.t.Helper()
-	h := NewHost(m.t, name, m.Clock, origins...)
+	return m.AddAt(name, m.Clock, origins...)
+}
+
+// AddAt is Add with the host reading its own clock, as a machine whose clock
+// lags the rest of the mesh does.
+func (m *Mesh) AddAt(name string, clock *Clock, origins ...*Origin) *Host {
+	m.t.Helper()
+	h := NewHost(m.t, name, clock, origins...)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hosts[name] = h
