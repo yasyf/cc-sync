@@ -269,13 +269,15 @@ type restorer struct {
 }
 
 func (r restorer) Restore(ctx context.Context, snap worktree.Snapshot, src worktree.ArtifactSource, opts pickup.RestoreOptions) (pickup.Restored, error) {
-	got, err := r.code.Restore(ctx, r.reg, snap, src, worktree.RestoreOptions{Dest: opts.Dest, Branch: opts.Branch, Fresh: opts.Fresh, FetchLFS: opts.FetchLFS})
+	got, err := r.code.Restore(ctx, r.reg, snap, src, worktree.RestoreOptions{
+		Dest: opts.Dest, Branch: opts.Branch, Fresh: opts.Fresh, FetchLFS: opts.FetchLFS, ApplySparse: opts.ApplySparse,
+	})
 	if err != nil {
 		return pickup.Restored{}, err
 	}
 	return pickup.Restored{
 		Path: got.Path, Branch: got.Branch, Head: got.Head, Reused: got.Reused, Applied: got.Applied,
-		Newer: got.Newer, LFSPending: got.LFSPending, Exact: got.Exact, Differences: got.Differences,
+		Newer: got.Newer, LFSPending: got.LFSPending, Exact: got.Exact, Differences: got.Differences, Sparse: got.Sparse,
 	}, nil
 }
 
