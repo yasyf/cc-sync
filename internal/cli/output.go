@@ -203,6 +203,10 @@ func renderStatus(p *printer, res StatusResult) {
 		p.printf("delivery: unavailable (%s)\n", res.Delivery.Reason)
 	}
 	for _, peer := range res.Peers {
+		if !res.Delivery.Available {
+			p.printf("peer %s (%s): delivery unknown\n", peer.HostName, peer.HostID)
+			continue
+		}
 		reach := "unreachable"
 		if peer.Reachable {
 			reach = "reachable"

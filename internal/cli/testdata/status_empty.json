@@ -17,7 +17,7 @@
     }
   },
   "delivery": {
-    "available": false,
+    "available": true,
     "reason": ""
   },
   "peers": [],

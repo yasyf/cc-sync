@@ -57,7 +57,8 @@ func TestJSONGolden(t *testing.T) {
 		args []string
 	}{
 		{"status_full", &fakeService{status: fullStatus()}, []string{"status", "--json"}},
-		{"status_empty", &fakeService{status: cli.StatusResult{Local: cli.LocalHost{Network: cli.Network{Status: cli.NetworkUnknown}}}}, []string{"status", "--json"}},
+		{"status_empty", &fakeService{status: cli.StatusResult{Local: cli.LocalHost{Network: cli.Network{Status: cli.NetworkUnknown}}, Delivery: cli.DeliveryService{Available: true}}}, []string{"status", "--json"}},
+		{"status_degraded", &fakeService{status: degradedStatus()}, []string{"status", "--json"}},
 		{"list_full", &fakeService{list: cli.ListResult{
 			GeneratedAt: ts(12, 10),
 			Local:       cli.Host{HostID: "host-air", HostName: "air"},

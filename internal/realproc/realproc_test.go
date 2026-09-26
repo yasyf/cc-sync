@@ -5,11 +5,11 @@
 // cc-sync, Claude, and TMPDIR path lives under one short temp root, launchd is
 // never touched, and teardown kills exactly the processes the test started.
 //
-// Run with REALPROC_SYNCKIT naming the synckit source tree to build synckitd
-// from, and optionally REALPROC_OLD_SYNCKIT naming an older synckit tree for
-// the version-skew check:
+// synckitd is built with GOWORK=off from the synckit version go.mod pins, or
+// from the synckit source tree REALPROC_SYNCKIT names; REALPROC_OLD_SYNCKIT
+// optionally names an older synckit tree for the version-skew check:
 //
-//	REALPROC_SYNCKIT=~/src/synckit go test -tags realproc -count=1 -v ./internal/realproc/
+//	GOWORK=off go test -tags realproc -count=1 -v ./internal/realproc/
 package realproc_test
 
 import (
@@ -45,11 +45,10 @@ const (
 )
 
 var (
-	root    string
-	bin     string
-	oldBin  string
-	buildOK bool
-	procs   = &registry{}
+	root   string
+	bin    string
+	oldBin string
+	procs  = &registry{}
 )
 
 func TestMain(m *testing.M) {
@@ -62,21 +61,15 @@ func TestMain(m *testing.M) {
 }
 
 func run(m *testing.M) (int, error) {
-	src := os.Getenv("REALPROC_SYNCKIT")
-	if src == "" {
-		fmt.Fprintln(os.Stderr, "realproc: REALPROC_SYNCKIT unset; every test skips")
-		return m.Run(), nil
-	}
 	var err error
 	root, err = os.MkdirTemp("/private/tmp", "ccs.")
 	if err != nil {
 		return 1, err
 	}
 	bin = filepath.Join(root, "bin")
-	if err := build(src); err != nil {
+	if err := build(os.Getenv("REALPROC_SYNCKIT")); err != nil {
 		return 1, errors.Join(err, os.RemoveAll(root))
 	}
-	buildOK = true
 	code := m.Run()
 	if err := teardown(); err != nil {
 		return 1, err
@@ -94,10 +87,11 @@ func build(src string) error {
 	if err != nil {
 		return err
 	}
-	steps := [][]string{
-		{src, filepath.Join(bin, "synckitd.real"), "./cmd/synckitd"},
-		{module, filepath.Join(bin, "cc-sync"), "./cmd/cc-sync"},
+	synckitd := []string{module, filepath.Join(bin, "synckitd.real"), "github.com/yasyf/synckit/cmd/synckitd"}
+	if src != "" {
+		synckitd = []string{src, filepath.Join(bin, "synckitd.real"), "./cmd/synckitd"}
 	}
+	steps := [][]string{synckitd, {module, filepath.Join(bin, "cc-sync"), "./cmd/cc-sync"}}
 	if old := os.Getenv("REALPROC_OLD_SYNCKIT"); old != "" {
 		oldBin = filepath.Join(root, "oldbin")
 		steps = append(steps, []string{old, filepath.Join(oldBin, "synckitd.real"), "./cmd/synckitd"})
@@ -105,7 +99,7 @@ func build(src string) error {
 	for _, s := range steps {
 		cmd := exec.Command("go", "build", "-o", s[1], s[2])
 		cmd.Dir = s[0]
-		if s[0] != module {
+		if s[2] != "./cmd/cc-sync" {
 			cmd.Env = append(os.Environ(), "GOWORK=off")
 		}
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -243,9 +237,6 @@ type host struct {
 
 func newHost(t *testing.T, name, binDir string) *host {
 	t.Helper()
-	if !buildOK {
-		t.Skip("REALPROC_SYNCKIT unset")
-	}
 	dir := filepath.Join(root, name)
 	h := &host{
 		t:        t,
