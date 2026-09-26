@@ -41,7 +41,8 @@ const CheckoutStamp = "20060102-1504"
 const PinOwnerPrefix = "cc-sync/pickup/"
 
 // Config wires a Pickup. Orca nil means Orca is unavailable on this host.
-// FetchAllowed reports whether network policy allows bulk fetches now.
+// FetchAllowed reports whether network policy allows bulk fetches now; Run
+// consults it immediately before the restore that may fetch LFS base assets.
 // PreferClient is the Orca client instance whose saved view the import
 // prefers ($CC_SYNC_ORCA_CLIENT_INSTANCE_ID).
 type Config struct {

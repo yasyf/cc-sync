@@ -288,6 +288,33 @@ func (w *world) assertUnpinned() {
 	}
 }
 
+func TestPickupAdmitsLFSFetchAtRestore(t *testing.T) {
+	tests := []struct {
+		name    string
+		allowed bool
+	}{
+		{"unrestricted by restore", true},
+		{"restricted by restore", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newWorld(t)
+			allowed := !tt.allowed
+			w.cfg.FetchAllowed = func() bool { return allowed }
+			w.cfg.OpenStore = func(context.Context) (Store, error) {
+				allowed = tt.allowed
+				return w.store, nil
+			}
+			if _, err := w.run(Request{}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if want := []RestoreOptions{{Dest: dest, FetchLFS: tt.allowed}}; !reflect.DeepEqual(w.code.opts, want) {
+				t.Errorf("restore = %+v, want %+v: the network policy as of the restore, not as of pickup start", w.code.opts, want)
+			}
+		})
+	}
+}
+
 func TestPickupWithOrca(t *testing.T) {
 	w := newWorld(t)
 	w.orca.result = orcabridge.ImportResult{WorktreeID: "orca-wt", Bindings: []orcabridge.ImportedBinding{

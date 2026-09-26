@@ -87,18 +87,27 @@ func (c meshCatalog) Load() (catalog.Snapshot, error) {
 }
 
 func currentNetwork(ctx context.Context) (st netpolicy.State, err error) {
+	m, err := openNetwork(ctx)
+	if err != nil {
+		return netpolicy.State{}, err
+	}
+	defer func() { err = errors.Join(err, m.Close()) }()
+	st, _ = m.Current()
+	return st, nil
+}
+
+func openNetwork(ctx context.Context) (netpolicy.Monitor, error) {
 	path, err := netpolicy.ManualPath()
 	if err != nil {
-		return netpolicy.State{}, fmt.Errorf("resolve manual network policy: %w", err)
+		return nil, fmt.Errorf("resolve manual network policy: %w", err)
 	}
 	m, err := netpolicy.NewMonitor(path)
 	if err != nil {
-		return netpolicy.State{}, fmt.Errorf("start network monitor: %w", err)
+		return nil, fmt.Errorf("start network monitor: %w", err)
 	}
-	defer func() { err = errors.Join(err, m.Close()) }()
 	st, changed := m.Current()
 	if st.Status != netpolicy.StatusUnknown {
-		return st, nil
+		return m, nil
 	}
 	timer := time.NewTimer(networkSettle)
 	defer timer.Stop()
@@ -106,10 +115,9 @@ func currentNetwork(ctx context.Context) (st netpolicy.State, err error) {
 	case <-changed:
 	case <-timer.C:
 	case <-ctx.Done():
-		return netpolicy.State{}, ctx.Err()
+		return nil, errors.Join(ctx.Err(), m.Close())
 	}
-	st, _ = m.Current()
-	return st, nil
+	return m, nil
 }
 
 type localOrca struct{}
@@ -233,7 +241,7 @@ type localPicker struct {
 	helper *helperclient.Client
 }
 
-func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.PickupResult, error) {
+func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (_ cli.PickupResult, err error) {
 	claude, err := claudenative.DefaultLayout()
 	if err != nil {
 		return cli.PickupResult{}, err
@@ -242,10 +250,11 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.Pic
 	if err != nil {
 		return cli.PickupResult{}, fmt.Errorf("resolve home: %w", err)
 	}
-	network, err := currentNetwork(ctx)
+	network, err := openNetwork(ctx)
 	if err != nil {
 		return cli.PickupResult{}, err
 	}
+	defer func() { err = errors.Join(err, network.Close()) }()
 	root, err := resident.ArtifactRoot()
 	if err != nil {
 		return cli.PickupResult{}, err
@@ -270,7 +279,10 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.Pic
 			DisplacedRoot: filepath.Join(p.layout.Dir, "displaced"),
 			Now:           time.Now,
 		},
-		FetchAllowed: network.Unrestricted,
+		FetchAllowed: func() bool {
+			state, _ := network.Current()
+			return state.Unrestricted()
+		},
 		Layout:       claude,
 		Home:         home,
 		ReplicaRoot:  p.layout.ReplicaRoot,
