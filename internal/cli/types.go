@@ -19,6 +19,18 @@ func At(t time.Time) Time { return Time{t} }
 // AtPtr wraps t as a nullable Time.
 func AtPtr(t time.Time) *Time { return &Time{t} }
 
+// Duration is an interval that encodes as a Go duration string, matching
+// synckit's codec.
+type Duration time.Duration
+
+// MarshalJSON encodes d as its Go duration string.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.String())
+}
+
+// String formats d as a Go duration.
+func (d Duration) String() string { return time.Duration(d).String() }
+
 // Array is a slice that encodes nil as [] so every JSON array is present.
 type Array[T any] []T
 
@@ -211,11 +223,25 @@ type QueuedByTier struct {
 	Idle       int `json:"idle"`
 }
 
+// CaptureTiers is the effective capture cadence: a worktree whose most urgent
+// session had human, autonomous, or any activity within that tier's window is
+// captured at the tier's interval, and at IdleInterval otherwise.
+type CaptureTiers struct {
+	HumanInterval      Duration `json:"human_interval"`
+	AutonomousInterval Duration `json:"autonomous_interval"`
+	RecentInterval     Duration `json:"recent_interval"`
+	IdleInterval       Duration `json:"idle_interval"`
+	HumanWindow        Duration `json:"human_window"`
+	AutonomousWindow   Duration `json:"autonomous_window"`
+	RecentWindow       Duration `json:"recent_window"`
+}
+
 // Scheduler reports the capture scheduler.
 type Scheduler struct {
 	QueuedByTier QueuedByTier `json:"queued_by_tier"`
 	Workers      int          `json:"workers"`
 	LastRoundAt  *Time        `json:"last_round_at"`
+	Tiers        CaptureTiers `json:"tiers"`
 }
 
 // StatusResult is the payload of `cc-sync status`.

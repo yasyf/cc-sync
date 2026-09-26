@@ -193,6 +193,15 @@ func fullStatus() cli.StatusResult {
 			QueuedByTier: cli.QueuedByTier{Human: 1, Autonomous: 2, Recent: 3, Idle: 4},
 			Workers:      2,
 			LastRoundAt:  tsp(12, 6),
+			Tiers: cli.CaptureTiers{
+				HumanInterval:      cli.Duration(2 * time.Minute),
+				AutonomousInterval: cli.Duration(5 * time.Minute),
+				RecentInterval:     cli.Duration(15 * time.Minute),
+				IdleInterval:       cli.Duration(time.Hour),
+				HumanWindow:        cli.Duration(15 * time.Minute),
+				AutonomousWindow:   cli.Duration(15 * time.Minute),
+				RecentWindow:       cli.Duration(time.Hour),
+			},
 		},
 	}
 }

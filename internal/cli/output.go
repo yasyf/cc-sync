@@ -199,6 +199,9 @@ func renderStatus(p *printer, res StatusResult) {
 	q := res.Scheduler.QueuedByTier
 	p.printf("scheduler: %d workers, queued human=%d autonomous=%d recent=%d idle=%d, last round %s\n",
 		res.Scheduler.Workers, q.Human, q.Autonomous, q.Recent, q.Idle, formatOptionalTime(res.Scheduler.LastRoundAt, "never"))
+	t := res.Scheduler.Tiers
+	p.printf("capture tiers: human every %s within %s, autonomous every %s within %s, recent every %s within %s, idle every %s\n",
+		t.HumanInterval, t.HumanWindow, t.AutonomousInterval, t.AutonomousWindow, t.RecentInterval, t.RecentWindow, t.IdleInterval)
 }
 
 func renderList(p *printer, res ListResult) {
