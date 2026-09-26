@@ -14,6 +14,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/cc-sync/internal/version"
 	"github.com/yasyf/synckit/artifact"
@@ -249,7 +250,7 @@ func TestVerifyLoopCancelsInFlightFetchOnRestriction(t *testing.T) {
 		{
 			name:     "manual metered without a path change",
 			restrict: func(m *fakeMonitor) { m.meter(true) },
-			within:   policyPoll + time.Second,
+			within:   netgate.Poll + time.Second,
 			reason:   "local: manual metered",
 		},
 	}
@@ -366,7 +367,7 @@ func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 				monitor.meter(true)
 				select {
 				case <-paused:
-				case <-time.After(policyPoll + time.Second):
+				case <-time.After(netgate.Poll + time.Second):
 					t.Fatal("manual metering did not pause the in-flight verification")
 				}
 				want = 2
@@ -384,8 +385,8 @@ func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 				if call != want {
 					t.Fatalf("resumed verification = call %d, want %d", call, want)
 				}
-			case <-time.After(policyPoll + time.Second):
-				t.Fatalf("deferred verification did not resume within %v of manual metering clearing", policyPoll+time.Second)
+			case <-time.After(netgate.Poll + time.Second):
+				t.Fatalf("deferred verification did not resume within %v of manual metering clearing", netgate.Poll+time.Second)
 			}
 			cancel()
 			if err := <-done; !errors.Is(err, context.Canceled) {

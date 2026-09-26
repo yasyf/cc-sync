@@ -182,11 +182,8 @@ func (h *Host) pickupConfig() pickup.Config {
 			DisplacedRoot: filepath.Join(h.Layout.Dir, "displaced"),
 			Now:           h.Clock.Now,
 		},
-		Orca: orca,
-		FetchAllowed: func() bool {
-			state, _ := h.Net.Current()
-			return state.Unrestricted()
-		},
+		Orca:         orca,
+		Network:      h.Net,
 		Layout:       h.Claude,
 		Home:         h.Home,
 		ReplicaRoot:  h.Layout.ReplicaRoot,

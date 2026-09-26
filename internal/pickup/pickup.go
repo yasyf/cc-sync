@@ -22,11 +22,14 @@ import (
 	"github.com/yasyf/cc-sync/internal/claudenative"
 	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/replica"
 	"github.com/yasyf/cc-sync/internal/sessionarchive"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/netpolicy"
 )
 
 // PinTTL bounds a pickup pin, so a crashed pickup never pins forever.
@@ -41,8 +44,9 @@ const CheckoutStamp = "20060102-1504"
 const PinOwnerPrefix = "cc-sync/pickup/"
 
 // Config wires a Pickup. Orca nil means Orca is unavailable on this host.
-// FetchAllowed reports whether network policy allows bulk fetches now; Run
-// consults it immediately before the restore that may fetch LFS base assets.
+// Network is this host's network monitor: the restore starts its fetch of
+// missing LFS base assets only while Network allows bulk transfer, and
+// cancels the fetch the moment Network stops allowing it.
 // PreferClient is the Orca client instance whose saved view the import
 // prefers ($CC_SYNC_ORCA_CLIENT_INSTANCE_ID).
 type Config struct {
@@ -53,7 +57,7 @@ type Config struct {
 	Code         CodeRestorer
 	Sessions     SessionRestorer
 	Orca         Orca
-	FetchAllowed func() bool
+	Network      netpolicy.Monitor
 	Layout       claudenative.Layout
 	Home         string
 	ReplicaRoot  string
@@ -255,12 +259,22 @@ func (r *run) restoreCode(ctx context.Context, code *artifact.Ref, dest string) 
 		r.restored = Restored{Path: dest, Branch: r.pick.worktree.Repo.Branch}
 		return nil
 	}
-	restored, err := r.cfg.Code.Restore(ctx, r.store, *code, RestoreOptions{Dest: dest, FetchLFS: r.cfg.FetchAllowed(), ApplySparse: r.req.ApplySparse})
+	restored, err := r.cfg.Code.Restore(ctx, r.store, *code, RestoreOptions{Dest: dest, FetchLFS: r.fetchLFS, ApplySparse: r.req.ApplySparse})
 	if err != nil {
 		return fmt.Errorf("restore code to %s: %w", dest, err)
 	}
 	r.restored = restored
 	return ctx.Err()
+}
+
+func (p *Pickup) fetchLFS(ctx context.Context, fetch func(context.Context) error) error {
+	err := netgate.Run(ctx, p.cfg.Network, fetch)
+	var paused *netpolicy.PausedError
+	if errors.As(err, &paused) {
+		slog.Info("pickup: lfs fetch deferred by network policy", "reason", paused.Reason)
+		return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, paused)
+	}
+	return err
 }
 
 func (r *run) discard(ctx context.Context) error {

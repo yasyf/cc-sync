@@ -96,11 +96,14 @@ func (v fakeVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.
 type fakeCode struct {
 	restored Restored
 	opts     []RestoreOptions
+	gated    []bool
 	code     []artifact.Ref
 	removed  []Restored
 }
 
 func (c *fakeCode) Restore(_ context.Context, _ codesnap.Reader, code artifact.Ref, opts RestoreOptions) (Restored, error) {
+	c.gated = append(c.gated, opts.FetchLFS != nil)
+	opts.FetchLFS = nil
 	c.opts, c.code = append(c.opts, opts), append(c.code, code)
 	r := c.restored
 	if r.Path == "" {
@@ -255,9 +258,9 @@ func newWorld(t *testing.T) *world {
 		Catalog: fakeCatalog{w.snap}, Pinner: w.pinner,
 		OpenStore: func(context.Context) (Store, error) { return w.store, nil },
 		Verifier:  w.verifier, Code: w.code, Sessions: w.sessions, Orca: w.orca,
-		FetchAllowed: func() bool { return true },
-		Layout:       claudenative.Layout{ConfigDir: filepath.Join(home, ".claude"), TmpRoot: "/tmp", UID: 502},
-		Home:         home, ReplicaRoot: filepath.Join(home, "replicas"), CheckoutRoot: "/co",
+		Network: newFakeNetwork(),
+		Layout:  claudenative.Layout{ConfigDir: filepath.Join(home, ".claude"), TmpRoot: "/tmp", UID: 502},
+		Home:    home, ReplicaRoot: filepath.Join(home, "replicas"), CheckoutRoot: "/co",
 		PreferClient: "client-7", Now: func() time.Time { return now },
 	}
 	return w
@@ -288,33 +291,6 @@ func (w *world) assertUnpinned() {
 	}
 }
 
-func TestPickupAdmitsLFSFetchAtRestore(t *testing.T) {
-	tests := []struct {
-		name    string
-		allowed bool
-	}{
-		{"unrestricted by restore", true},
-		{"restricted by restore", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := newWorld(t)
-			allowed := !tt.allowed
-			w.cfg.FetchAllowed = func() bool { return allowed }
-			w.cfg.OpenStore = func(context.Context) (Store, error) {
-				allowed = tt.allowed
-				return w.store, nil
-			}
-			if _, err := w.run(Request{}); err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			if want := []RestoreOptions{{Dest: dest, FetchLFS: tt.allowed}}; !reflect.DeepEqual(w.code.opts, want) {
-				t.Errorf("restore = %+v, want %+v: the network policy as of the restore, not as of pickup start", w.code.opts, want)
-			}
-		})
-	}
-}
-
 func TestPickupWithOrca(t *testing.T) {
 	w := newWorld(t)
 	w.orca.result = orcabridge.ImportResult{WorktreeID: "orca-wt", Bindings: []orcabridge.ImportedBinding{
@@ -340,8 +316,8 @@ func TestPickupWithOrca(t *testing.T) {
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("result = %+v\nwant %+v", res, want)
 	}
-	if want := []RestoreOptions{{Dest: dest, FetchLFS: true}}; !reflect.DeepEqual(w.code.opts, want) || w.code.code[0] != w.codeRef {
-		t.Errorf("restore = %+v of %v, want %+v of the code group", w.code.opts, w.code.code, want)
+	if want := []RestoreOptions{{Dest: dest}}; !reflect.DeepEqual(w.code.opts, want) || !reflect.DeepEqual(w.code.gated, []bool{true}) || w.code.code[0] != w.codeRef {
+		t.Errorf("restore = %+v (LFS fetch gated %v) of %v, want %+v gated by network policy of the code group", w.code.opts, w.code.gated, w.code.code, want)
 	}
 	if !reflect.DeepEqual(w.sessions.applied, []string{sidHuman, sidIdle}) {
 		t.Errorf("applied = %v, want both sessions", w.sessions.applied)

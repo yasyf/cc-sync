@@ -279,10 +279,7 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (_ cli.P
 			DisplacedRoot: filepath.Join(p.layout.Dir, "displaced"),
 			Now:           time.Now,
 		},
-		FetchAllowed: func() bool {
-			state, _ := network.Current()
-			return state.Unrestricted()
-		},
+		Network:      network,
 		Layout:       claude,
 		Home:         home,
 		ReplicaRoot:  p.layout.ReplicaRoot,

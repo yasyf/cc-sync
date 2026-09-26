@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/yasyf/daemonkit"
@@ -19,6 +18,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/helperruntime"
@@ -36,8 +36,6 @@ const (
 	// partial-capture pins are dropped.
 	DefaultExpireInterval = 15 * time.Minute
 )
-
-const policyPoll = time.Second
 
 // Store is the slice of the synckit artifact store the resident itself
 // drives; the capture pipeline receives the concrete store.
@@ -308,7 +306,7 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 		state, changed := monitor.Current()
 		deferred := !state.Unrestricted()
 		if !deferred {
-			err := whileUnrestricted(ctx, monitor, verify)
+			err := netgate.Run(ctx, monitor, verify)
 			var paused *netpolicy.PausedError
 			switch {
 			case ctx.Err() != nil:
@@ -322,7 +320,7 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 		}
 		var recheck <-chan time.Time
 		if deferred {
-			recheck = time.After(policyPoll)
+			recheck = time.After(netgate.Poll)
 		}
 		select {
 		case <-ctx.Done():
@@ -331,38 +329,6 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 		case <-nudges:
 		case <-changed:
 		case <-recheck:
-		}
-	}
-}
-
-func whileUnrestricted(ctx context.Context, monitor netpolicy.Monitor, fn func(context.Context) error) error {
-	var watcher sync.WaitGroup
-	defer watcher.Wait()
-	fnCtx, pause := context.WithCancelCause(ctx)
-	defer pause(nil)
-	watcher.Go(func() { pauseOnRestriction(fnCtx, monitor, pause) })
-	err := fn(fnCtx)
-	var paused *netpolicy.PausedError
-	if err != nil && errors.As(context.Cause(fnCtx), &paused) {
-		return paused
-	}
-	return err
-}
-
-func pauseOnRestriction(ctx context.Context, monitor netpolicy.Monitor, pause context.CancelCauseFunc) {
-	poll := time.NewTicker(policyPoll)
-	defer poll.Stop()
-	for {
-		state, changed := monitor.Current()
-		if verdict := netpolicy.Evaluate(state, netpolicy.State{Status: netpolicy.StatusConnected}); !verdict.Allowed {
-			pause(&netpolicy.PausedError{Reason: verdict.Reason})
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-changed:
-		case <-poll.C:
 		}
 	}
 }
