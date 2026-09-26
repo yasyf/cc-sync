@@ -4,6 +4,8 @@ go 1.26
 
 require (
 	github.com/spf13/cobra v1.10.2
+	github.com/yasyf/daemonkit v0.23.0
+	github.com/yasyf/reposync v0.30.1
 	github.com/yasyf/synckit v0.39.2
 )
 
