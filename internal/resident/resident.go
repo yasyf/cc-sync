@@ -306,17 +306,23 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 	defer ticker.Stop()
 	for {
 		state, changed := monitor.Current()
-		if state.Unrestricted() {
+		deferred := !state.Unrestricted()
+		if !deferred {
 			err := whileUnrestricted(ctx, monitor, verify)
 			var paused *netpolicy.PausedError
 			switch {
 			case ctx.Err() != nil:
 				return ctx.Err()
 			case errors.As(err, &paused):
+				deferred = true
 				slog.Info("deferred verification paused by network policy", "reason", paused.Reason)
 			case err != nil:
 				slog.Warn("deferred verification failed", "err", err)
 			}
+		}
+		var recheck <-chan time.Time
+		if deferred {
+			recheck = time.After(policyPoll)
 		}
 		select {
 		case <-ctx.Done():
@@ -324,6 +330,7 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 		case <-ticker.C:
 		case <-nudges:
 		case <-changed:
+		case <-recheck:
 		}
 	}
 }

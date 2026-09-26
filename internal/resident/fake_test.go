@@ -120,10 +120,10 @@ func (m *fakeMonitor) set(state netpolicy.State) {
 	m.changed = make(chan struct{})
 }
 
-func (m *fakeMonitor) meter() {
+func (m *fakeMonitor) meter(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.ManualMetered = true
+	m.state.ManualMetered = on
 }
 
 type fakeInventory struct {

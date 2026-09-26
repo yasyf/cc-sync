@@ -248,7 +248,7 @@ func TestVerifyLoopCancelsInFlightFetchOnRestriction(t *testing.T) {
 		},
 		{
 			name:     "manual metered without a path change",
-			restrict: (*fakeMonitor).meter,
+			restrict: func(m *fakeMonitor) { m.meter(true) },
 			within:   policyPoll + time.Second,
 			reason:   "local: manual metered",
 		},
@@ -326,5 +326,71 @@ func TestVerifyLoopResumesWhenUnrestricted(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Errorf("verifyLoop = %v, want context.Canceled", err)
+	}
+}
+
+func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
+	tests := []struct {
+		name     string
+		inFlight bool
+	}{
+		{"metered before verification", false},
+		{"metered during verification", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			monitor := newFakeMonitor(unrestricted)
+			if !tt.inFlight {
+				monitor.meter(true)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			calls := make(chan int, 8)
+			paused := make(chan struct{})
+			var n atomic.Int32
+			done := make(chan error, 1)
+			go func() {
+				done <- verifyLoop(ctx, monitor, time.Hour, make(chan struct{}), func(fetchCtx context.Context) error {
+					call := int(n.Add(1))
+					calls <- call
+					if !tt.inFlight || call > 1 {
+						return nil
+					}
+					<-fetchCtx.Done()
+					close(paused)
+					return fetchCtx.Err()
+				})
+			}()
+			want := 1
+			if tt.inFlight {
+				<-calls
+				monitor.meter(true)
+				select {
+				case <-paused:
+				case <-time.After(policyPoll + time.Second):
+					t.Fatal("manual metering did not pause the in-flight verification")
+				}
+				want = 2
+			} else {
+				monitor.awaitReads(1)
+			}
+			select {
+			case call := <-calls:
+				t.Fatalf("verification %d started while the network was manually metered", call)
+			case <-time.After(50 * time.Millisecond):
+			}
+			monitor.meter(false)
+			select {
+			case call := <-calls:
+				if call != want {
+					t.Fatalf("resumed verification = call %d, want %d", call, want)
+				}
+			case <-time.After(policyPoll + time.Second):
+				t.Fatalf("deferred verification did not resume within %v of manual metering clearing", policyPoll+time.Second)
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Errorf("verifyLoop = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
