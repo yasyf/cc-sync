@@ -76,6 +76,7 @@ const (
 	PauseDisconnected   PauseReason = "disconnected"
 	PauseManualMetered  PauseReason = "manual-metered"
 	PausePeerOffline    PauseReason = "peer-offline"
+	PauseIncompatible   PauseReason = "incompatible"
 )
 
 // Endpoint names which side of a transfer imposed a pause.
