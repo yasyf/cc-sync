@@ -18,14 +18,17 @@ import (
 	applog "github.com/yasyf/cc-sync/internal/log"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/pickup"
+	"github.com/yasyf/cc-sync/internal/resident"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/cc-sync/internal/service"
 	"github.com/yasyf/cc-sync/internal/sessionrestore"
+	"github.com/yasyf/reposync/registry"
 	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/netpolicy"
+	"github.com/yasyf/synckit/rpc"
 )
 
 const networkSettle = time.Second
@@ -44,17 +47,17 @@ func wiring(layout config.Layout) service.Config {
 	term := cli.ProcessTerminal()
 	return service.Config{
 		Catalog:    meshCatalog{path: layout.CatalogPath},
-		Deliveries: unwiredDeliveries{},
+		Deliveries: synckitDeliveries{},
 		Mesh:       hostregistry.Mesh,
 		Network:    currentNetwork,
 		Orca:       localOrca{},
 		Live:       liveSessions,
 		Sessions:   localSessions,
 		Checkouts:  service.CheckoutDir{Root: layout.CheckoutRoot},
-		Helper:     unwiredHelper{},
-		Installer:  unwiredInstaller{},
+		Helper:     helperClient{},
+		Installer:  residentInstaller{layout: layout},
 		Picker:     localPicker{layout: layout},
-		Serve:      func(context.Context) error { return unwired("the resident helper (internal/resident)") },
+		Serve:      func(ctx context.Context) error { return serve(ctx, layout) },
 		Tiers:      func() (cli.CaptureTiers, error) { return captureTiers(layout.ConfigPath) },
 		Environ:    term.Environ,
 		Exec:       term.Exec,
@@ -156,30 +159,99 @@ func unwired(what string) error {
 	return fmt.Errorf("%w: %s is not wired into this build", service.ErrUnavailable, what)
 }
 
-type unwiredDeliveries struct{}
+type synckitDeliveries struct{}
 
-func (unwiredDeliveries) Status(context.Context, string) ([]delivery.PeerStatus, error) {
-	return nil, unwired("synckit delivery status")
+func (synckitDeliveries) Status(ctx context.Context, serviceID string) ([]delivery.PeerStatus, error) {
+	statuses, err := delivery.Status(ctx, serviceID)
+	var transport *rpc.TransportError
+	if errors.As(err, &transport) && transport.Undispatched {
+		return nil, fmt.Errorf("%w: synckitd is not running: %w", service.ErrUnavailable, err)
+	}
+	return statuses, err
 }
 
-type unwiredHelper struct{}
-
-func (unwiredHelper) Status(context.Context) (service.HelperStatus, error) {
-	return service.HelperStatus{}, unwired("the resident helper client")
+func unavailable(err error) error {
+	if errors.Is(err, resident.ErrNotRunning) {
+		return fmt.Errorf("%w: %w", service.ErrUnavailable, err)
+	}
+	return err
 }
 
-func (unwiredHelper) Kick(context.Context, []string) ([]scheduler.Attempt, error) {
-	return nil, unwired("the resident helper client")
+type helperClient struct{}
+
+func (helperClient) Status(ctx context.Context) (_ service.HelperStatus, err error) {
+	c := resident.Dial()
+	defer func() { err = errors.Join(err, c.Close()) }()
+	reply, err := c.Status(ctx)
+	if err != nil {
+		return service.HelperStatus{}, unavailable(err)
+	}
+	return service.HelperStatus{Build: reply.Build, Scheduler: reply.Scheduler}, nil
 }
 
-type unwiredInstaller struct{}
-
-func (unwiredInstaller) Install(context.Context, cli.InstallRequest) (cli.InstallResult, error) {
-	return cli.InstallResult{}, unwired("install (internal/resident)")
+func (helperClient) Kick(ctx context.Context, sessionIDs []string) (_ []scheduler.Attempt, err error) {
+	c := resident.Dial()
+	defer func() { err = errors.Join(err, c.Close()) }()
+	attempts, err := c.Kick(ctx, sessionIDs)
+	return attempts, unavailable(err)
 }
 
-func (unwiredInstaller) Uninstall(context.Context, cli.UninstallRequest) (cli.UninstallResult, error) {
-	return cli.UninstallResult{}, unwired("uninstall (internal/resident)")
+func (helperClient) Pin(ctx context.Context, owner string, roots []artifact.Ref, ttl time.Duration) (err error) {
+	c := resident.Dial()
+	defer func() { err = errors.Join(err, c.Close()) }()
+	return unavailable(c.Pin(ctx, owner, roots, ttl))
+}
+
+type residentInstaller struct {
+	layout config.Layout
+}
+
+func (i residentInstaller) Install(ctx context.Context, req cli.InstallRequest) (cli.InstallResult, error) {
+	self, err := resident.MeshSelf()
+	if err != nil {
+		return cli.InstallResult{}, err
+	}
+	if req.NoSynckitd {
+		err = resident.Ensure(i.layout, self)
+	} else {
+		err = resident.Install(ctx, resident.ExecRunner, i.layout, self)
+	}
+	if err != nil {
+		return cli.InstallResult{}, err
+	}
+	res := cli.InstallResult{ConfigDir: i.layout.Dir, Synckitd: !req.NoSynckitd}
+	status, err := helperClient{}.Status(ctx)
+	switch {
+	case errors.Is(err, service.ErrUnavailable):
+	case err != nil:
+		return cli.InstallResult{}, fmt.Errorf("probe helper: %w", err)
+	default:
+		res.Helper = cli.Helper{Running: true, Build: status.Build}
+	}
+	return res, nil
+}
+
+func (i residentInstaller) Uninstall(ctx context.Context, req cli.UninstallRequest) (cli.UninstallResult, error) {
+	var purge []string
+	if req.Purge {
+		root, err := resident.ArtifactRoot()
+		if err != nil {
+			return cli.UninstallResult{}, err
+		}
+		purge = []string{i.layout.Dir, root}
+	}
+	if err := resident.Uninstall(ctx, resident.ExecRunner, purge); err != nil {
+		return cli.UninstallResult{}, err
+	}
+	return cli.UninstallResult{Purged: req.Purge}, nil
+}
+
+func serve(ctx context.Context, layout config.Layout) error {
+	deps, err := resident.SystemDeps(layout)
+	if err != nil {
+		return err
+	}
+	return resident.Serve(ctx, deps)
 }
 
 type localPicker struct {
@@ -195,11 +267,23 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.Pic
 	if err != nil {
 		return cli.PickupResult{}, fmt.Errorf("resolve home: %w", err)
 	}
+	root, err := resident.ArtifactRoot()
+	if err != nil {
+		return cli.PickupResult{}, err
+	}
+	store, err := artifact.OpenReadOnly(root)
+	if err != nil {
+		return cli.PickupResult{}, fmt.Errorf("open artifact store: %w", err)
+	}
+	code, err := worktree.OpenStore(p.layout.CodeStore)
+	if err != nil {
+		return cli.PickupResult{}, fmt.Errorf("open code store: %w", err)
+	}
 	cfg := pickup.Config{
 		Catalog:   meshCatalog{path: p.layout.CatalogPath},
-		Pinner:    unwiredPinner{},
-		OpenStore: openArtifacts,
-		Verifier:  unwiredVerifier{},
+		Pinner:    helperClient{},
+		OpenStore: func(context.Context) (pickup.Store, error) { return store, nil },
+		Verifier:  consumer.Reposync{Store: store, Code: code, Registry: registry.Load},
 		Code:      pickup.Reposync{Worktrees: unwiredWorktrees{}},
 		Sessions: &pickup.Native{
 			Run:           sessionrestore.SystemRunner(),
@@ -221,26 +305,6 @@ func (p localPicker) Pickup(ctx context.Context, req cli.PickupRequest) (cli.Pic
 		slog.Info("pickup: orca unavailable, sessions launch natively", "err", err)
 	}
 	return pickup.New(cfg).Pickup(ctx, req)
-}
-
-func openArtifacts(context.Context) (pickup.Store, error) {
-	root, err := artifact.ServiceRoot("cc-sync")
-	if err != nil {
-		return nil, err
-	}
-	return artifact.OpenReadOnly(root)
-}
-
-type unwiredPinner struct{}
-
-func (unwiredPinner) Pin(context.Context, string, []artifact.Ref, time.Duration) error {
-	return unwired("the ccsync.pin.v1 client")
-}
-
-type unwiredVerifier struct{}
-
-func (unwiredVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
-	return consumer.CodeVerdict{}, unwired("the reposync code verifier")
 }
 
 type unwiredWorktrees struct{}
