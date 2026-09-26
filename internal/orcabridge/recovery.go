@@ -28,6 +28,16 @@ type PathMapping struct {
 	To   string
 }
 
+// SessionMapping renames a descriptor binding's provider session From to the
+// local id To that a forked pickup installed it under.
+type SessionMapping struct {
+	From string
+	To   string
+}
+
+// MediaDescriptor is the artifact media of a stored Orca recovery descriptor.
+const MediaDescriptor = "cc-sync.orca-descriptor"
+
 // ImportRequest is one `orca recovery import`; Descriptor is passed on stdin verbatim.
 type ImportRequest struct {
 	Descriptor   []byte
@@ -35,6 +45,7 @@ type ImportRequest struct {
 	CheckpointID string
 	PathMap      []PathMapping
 	Resume       []string
+	SessionIDMap []SessionMapping
 	PreferClient string
 	Activate     bool
 	RegisterRepo bool
@@ -159,6 +170,9 @@ func importArgs(req ImportRequest) ([]string, error) {
 	}
 	for _, id := range req.Resume {
 		args = append(args, "--resume", id)
+	}
+	for _, m := range req.SessionIDMap {
+		args = append(args, "--session-map", m.From+"="+m.To)
 	}
 	if req.PreferClient != "" {
 		args = append(args, "--prefer-client", req.PreferClient)
