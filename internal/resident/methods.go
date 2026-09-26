@@ -41,7 +41,7 @@ type CatalogStatus struct {
 }
 
 // OriginStatus counts one origin block's worktrees and checkpoints, and how
-// many of those checkpoints are ready on this host.
+// many of those checkpoints are pick-up ready on this host.
 type OriginStatus struct {
 	Origin      string `json:"origin"`
 	Revision    uint64 `json:"revision"`
@@ -116,7 +116,7 @@ func (m methods) status() (StatusReply, error) {
 		for _, wt := range o.Worktrees {
 			for _, cp := range wt.Checkpoints {
 				status.Checkpoints++
-				if snapshot.ReadinessOf(o.Origin, cp).Ready {
+				if snapshot.PickupReady(o.Origin, cp) {
 					status.Ready++
 				}
 			}

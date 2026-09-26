@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,18 +34,23 @@ func selectCheckpoint(snap catalog.Snapshot, target cli.Target, sel cli.Checkpoi
 		sel = cli.LatestCheckpoint{}
 	}
 	if byID, ok := sel.(cli.CheckpointID); ok {
-		return pickByID(pk, candidates, byID.Prefix, allowPartial)
+		return pickByID(snap, pk, candidates, byID.Prefix, allowPartial)
 	}
-	for _, cp := range candidates {
-		if cp.Deferred == "" && matches(cp, sel, now) {
+	newest := -1
+	for i, cp := range candidates {
+		if !matches(cp, sel, now) {
+			continue
+		}
+		if snap.PickupReady(pk.origin, cp) {
 			pk.checkpoint = cp
 			return pk, nil
 		}
-	}
-	for _, cp := range candidates {
-		if matches(cp, sel, now) {
-			return pick{}, partialError(cp)
+		if newest < 0 {
+			newest = i
 		}
+	}
+	if newest >= 0 {
+		return pick{}, notReady(snap, pk.origin, candidates[newest])
 	}
 	return pick{}, fmt.Errorf("%w: no checkpoint of %s matches %s", ErrNotFound, pk.worktree.ID, sel)
 }
@@ -115,7 +121,7 @@ func sessionMatches(sessions []catalog.Session, prefix string) []string {
 	return ids
 }
 
-func pickByID(pk pick, candidates []catalog.Checkpoint, prefix string, allowPartial bool) (pick, error) {
+func pickByID(snap catalog.Snapshot, pk pick, candidates []catalog.Checkpoint, prefix string, allowPartial bool) (pick, error) {
 	var hits []catalog.Checkpoint
 	for _, cp := range candidates {
 		if strings.HasPrefix(cp.ID, prefix) {
@@ -127,15 +133,23 @@ func pickByID(pk pick, candidates []catalog.Checkpoint, prefix string, allowPart
 		return pick{}, fmt.Errorf("%w: checkpoint %s", ErrNotFound, prefix)
 	case len(hits) > 1:
 		return pick{}, fmt.Errorf("%w: checkpoint %s matches %d checkpoints", ErrAmbiguous, prefix, len(hits))
-	case hits[0].Deferred != "" && !allowPartial:
-		return pick{}, partialError(hits[0])
+	case !hits[0].Complete() && !allowPartial:
+		return pick{}, notReady(snap, pk.origin, hits[0])
 	}
 	pk.checkpoint = hits[0]
 	return pk, nil
 }
 
-func partialError(cp catalog.Checkpoint) error {
-	return &NotReadyError{CheckpointID: cp.ID, Missing: []string{"code deferred: " + cp.Deferred}}
+func notReady(snap catalog.Snapshot, origin string, cp catalog.Checkpoint) error {
+	r := snap.ReadinessOf(origin, cp)
+	missing := slices.Clone(r.Missing)
+	if r.Deferred != "" {
+		missing = append(missing, "code deferred: "+r.Deferred)
+	}
+	if !cp.Complete() {
+		missing = append(missing, "incomplete")
+	}
+	return &NotReadyError{CheckpointID: cp.ID, Missing: missing}
 }
 
 func matches(cp catalog.Checkpoint, sel cli.CheckpointSelector, now time.Time) bool {

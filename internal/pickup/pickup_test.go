@@ -244,8 +244,8 @@ func newWorld(t *testing.T) *world {
 			ID:   "wt-1",
 			Repo: catalog.Repo{Origin: "github.com/x/app", RelPath: "github.com/x/app", Branch: "feature/login", SourcePath: source},
 			Checkpoints: []catalog.Checkpoint{
-				{ID: "cp-mixed", Root: w.root, CapturedAt: capturedAt.Add(30 * time.Minute), Sessions: sessions, Deferred: "partial: big.bin", Classes: []catalog.Class{catalog.ClassLatest}},
-				{ID: "cp-good", Root: w.root, CapturedAt: capturedAt, Sessions: sessions, Classes: []catalog.Class{catalog.ClassHourly}},
+				{ID: "cp-mixed", Root: w.root, CapturedAt: capturedAt.Add(30 * time.Minute), Sessions: sessions, Deferred: "partial: big.bin", Classes: []catalog.Class{catalog.ClassLatest}, Completeness: catalog.Completeness{Complete: true}},
+				{ID: "cp-good", Root: w.root, CapturedAt: capturedAt, Sessions: sessions, Classes: []catalog.Class{catalog.ClassHourly}, Completeness: catalog.Completeness{Complete: true}},
 			},
 		}}}},
 		Readiness: map[string]catalog.Readiness{"cp-good": {Ready: true}, "cp-mixed": {Ready: true}},
@@ -483,6 +483,8 @@ func TestNotReady(t *testing.T) {
 		pinned  bool
 	}{
 		{"catalog readiness", func(w *world) {
+			wt := &w.snap.Origins[0].Worktrees[0]
+			wt.Checkpoints = wt.Checkpoints[1:]
 			w.snap.Readiness["cp-good"] = catalog.Readiness{Missing: []string{"closure"}}
 		}, []string{"closure"}, false},
 		{"closure", func(w *world) { w.store.missing = 3 }, []string{"3 artifacts"}, true},
@@ -571,7 +573,7 @@ func TestDeferredCode(t *testing.T) {
 		w := newWorld(t)
 		_, err := w.run(Request{Checkpoint: cli.CheckpointID{Prefix: "cp-mix"}})
 		var nr *NotReadyError
-		if !errors.As(err, &nr) || !reflect.DeepEqual(nr.Missing, []string{"code deferred: partial: big.bin"}) {
+		if !errors.As(err, &nr) || !reflect.DeepEqual(nr.Missing, []string{"code deferred: partial: big.bin", "incomplete"}) {
 			t.Fatalf("Run = %v, want not-ready naming the deferred code", err)
 		}
 	})
@@ -583,6 +585,59 @@ func TestDeferredCode(t *testing.T) {
 			t.Fatalf("Run = %+v, %v; want %+v", res.Checkpoint, err, want)
 		}
 	})
+}
+
+func TestDefaultSkipsCheckpointsNotPickupReady(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*world, *catalog.Checkpoint)
+		explicit []string
+		partial  *Checkpoint
+	}{
+		{
+			name: "session-incomplete",
+			mutate: func(_ *world, cp *catalog.Checkpoint) {
+				cp.Completeness = catalog.Completeness{Missing: []string{"session:" + sidHuman}}
+			},
+			explicit: []string{"incomplete"},
+			partial:  &Checkpoint{ID: "cp-newer", CapturedAt: capturedAt.Add(30 * time.Minute), Partial: true},
+		},
+		{
+			name: "complete but unverified",
+			mutate: func(w *world, _ *catalog.Checkpoint) {
+				w.snap.Readiness["cp-newer"] = catalog.Readiness{Missing: []string{"prerequisites-missing"}}
+			},
+			explicit: []string{"prerequisites-missing"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newWorld(t)
+			newer := &w.snap.Origins[0].Worktrees[0].Checkpoints[0]
+			newer.ID, newer.Deferred = "cp-newer", ""
+			w.snap.Readiness["cp-newer"] = catalog.Readiness{Ready: true}
+			tt.mutate(w, newer)
+			res, err := w.run(Request{NoOrca: true})
+			if err != nil || res.Checkpoint != (Checkpoint{ID: "cp-good", CapturedAt: capturedAt}) {
+				t.Fatalf("default Run = %+v, %v; want the older complete cp-good", res.Checkpoint, err)
+			}
+			_, err = w.run(Request{Checkpoint: cli.CheckpointID{Prefix: "cp-newer"}, NoOrca: true})
+			var nr *NotReadyError
+			if !errors.As(err, &nr) || nr.CheckpointID != "cp-newer" || !reflect.DeepEqual(nr.Missing, tt.explicit) {
+				t.Fatalf("explicit Run = %v, want not-ready cp-newer missing %v", err, tt.explicit)
+			}
+			res, err = w.run(Request{Checkpoint: cli.CheckpointID{Prefix: "cp-newer"}, AllowPartial: true, NoOrca: true})
+			if tt.partial == nil {
+				if !errors.As(err, &nr) || nr.CheckpointID != "cp-newer" || !reflect.DeepEqual(nr.Missing, tt.explicit) {
+					t.Fatalf("allow-partial Run = %v, want not-ready cp-newer missing %v", err, tt.explicit)
+				}
+				return
+			}
+			if err != nil || res.Checkpoint != *tt.partial {
+				t.Fatalf("allow-partial Run = %+v, %v; want %+v", res.Checkpoint, err, *tt.partial)
+			}
+		})
+	}
 }
 
 func TestSelection(t *testing.T) {
