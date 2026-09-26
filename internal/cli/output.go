@@ -275,6 +275,12 @@ func renderInspect(p *printer, res InspectResult) {
 		if d.Pause != nil {
 			state = formatPause(d.Pause)
 		}
+		switch d.Assurance {
+		case AssuranceDurable:
+			state += "; durable on peer"
+		case AssuranceHeld:
+			state += "; held on peer, not a complete recovery point"
+		}
 		p.printf("delivery to %s: %s\n", d.Peer, state)
 	}
 }

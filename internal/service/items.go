@@ -96,7 +96,7 @@ func boundSessions(ctx context.Context, orca Orca) (map[string]string, error) {
 }
 
 // List reports every recoverable worktree captured on another host, each at
-// its latest complete checkpoint.
+// its newest pick-up ready checkpoint.
 func (s *Service) List(ctx context.Context, req cli.ListRequest) (cli.ListResult, error) {
 	v, err := s.gather(ctx)
 	if err != nil {
@@ -111,7 +111,7 @@ func (s *Service) List(ctx context.Context, req cli.ListRequest) (cli.ListResult
 			if !listsRepo(w, req.Repo) {
 				continue
 			}
-			item, err := v.item(o.Origin, w, latest(w))
+			item, err := v.item(o.Origin, w, v.latest(o.Origin, w))
 			if err != nil {
 				return cli.ListResult{}, err
 			}
@@ -137,7 +137,7 @@ func (s *Service) Inspect(ctx context.Context, req cli.InspectRequest) (cli.Insp
 	if err != nil {
 		return cli.InspectResult{}, err
 	}
-	cp, err := pick(loc.worktree, req.Checkpoint, v.now)
+	cp, err := v.pick(loc.origin, loc.worktree, req.Checkpoint)
 	if err != nil {
 		return cli.InspectResult{}, err
 	}
@@ -153,6 +153,11 @@ func (s *Service) Inspect(ctx context.Context, req cli.InspectRequest) (cli.Insp
 		d := cli.Delivery{Peer: ps.Peer, State: cli.DeliveryState(ps.State)}
 		if d.Pause, err = peerPause(ps); err != nil {
 			return cli.InspectResult{}, err
+		}
+		if loc.origin == v.self {
+			if d.Assurance, err = v.assurance(ps, cp); err != nil {
+				return cli.InspectResult{}, fmt.Errorf("peer %s acked: %w", ps.Peer, err)
+			}
 		}
 		res.Delivery = append(res.Delivery, d)
 	}
@@ -274,7 +279,7 @@ func checkpoint(cp catalog.Checkpoint) *cli.Checkpoint {
 func (v view) completeness(origin string, w catalog.Worktree, cp catalog.Checkpoint) cli.Completeness {
 	r := v.snap.ReadinessOf(origin, cp)
 	c := cli.Completeness{
-		Ready:          r.Ready && cp.Deferred == "",
+		Ready:          v.snap.PickupReady(origin, cp),
 		Missing:        cli.Array[string](slices.Clone(r.Missing)),
 		Transcript:     cli.TranscriptComplete,
 		Code:           cli.CodeComplete,
@@ -309,7 +314,7 @@ func (v view) detail(origin string, cp catalog.Checkpoint) cli.CheckpointDetail 
 		ID:         cp.ID,
 		Tier:       cli.Tier(cp.Classes[0]),
 		CapturedAt: cli.At(cp.CapturedAt),
-		Ready:      r.Ready && cp.Deferred == "",
+		Ready:      v.snap.PickupReady(origin, cp),
 		Missing:    cli.Array[string](slices.Clone(r.Missing)),
 		Deferred:   cli.Array[string]{},
 	}
@@ -415,26 +420,41 @@ func newerPartial(w catalog.Worktree, target catalog.Checkpoint) *cli.PartialChe
 	return nil
 }
 
-func latest(w catalog.Worktree) catalog.Checkpoint {
-	for _, cp := range w.Checkpoints {
-		if !cp.Mixed() {
-			return cp
-		}
+func (v view) latest(origin string, w catalog.Worktree) catalog.Checkpoint {
+	if i := slices.IndexFunc(w.Checkpoints, func(cp catalog.Checkpoint) bool { return v.snap.PickupReady(origin, cp) }); i >= 0 {
+		return w.Checkpoints[i]
+	}
+	if i := slices.IndexFunc(w.Checkpoints, catalog.Checkpoint.Complete); i >= 0 {
+		return w.Checkpoints[i]
 	}
 	return w.Checkpoints[0]
 }
 
-func pick(w catalog.Worktree, sel cli.CheckpointSelector, now time.Time) (catalog.Checkpoint, error) {
+func (v view) assurance(ps delivery.PeerStatus, cp catalog.Checkpoint) (cli.Assurance, error) {
+	acked, err := revision(ps.Acked)
+	if err != nil || acked == nil {
+		return cli.AssuranceNone, err
+	}
+	return assurances[v.snap.AssuranceOf(cp, *acked, v.now)], nil
+}
+
+var assurances = map[catalog.Assurance]cli.Assurance{
+	catalog.AssuranceNone:    cli.AssuranceNone,
+	catalog.AssuranceHeld:    cli.AssuranceHeld,
+	catalog.AssuranceDurable: cli.AssuranceDurable,
+}
+
+func (v view) pick(origin string, w catalog.Worktree, sel cli.CheckpointSelector) (catalog.Checkpoint, error) {
 	var match func(catalog.Checkpoint) bool
 	switch sel := sel.(type) {
 	case cli.LatestCheckpoint:
-		return latest(w), nil
+		return v.latest(origin, w), nil
 	case cli.CheckpointID:
 		return byPrefix(w, sel.Prefix)
 	case cli.CheckpointAt:
 		match = func(cp catalog.Checkpoint) bool { return !cp.CapturedAt.After(sel.Time) }
 	case cli.CheckpointHourly:
-		cutoff := now.Add(-time.Duration(sel.HoursAgo) * time.Hour)
+		cutoff := v.now.Add(-time.Duration(sel.HoursAgo) * time.Hour)
 		match = func(cp catalog.Checkpoint) bool { return !cp.CapturedAt.After(cutoff) }
 	case cli.CheckpointDaily:
 		start := time.Date(sel.Year, sel.Month, sel.Day, 0, 0, 0, 0, time.UTC)

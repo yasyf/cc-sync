@@ -127,7 +127,7 @@ func block(t *testing.T, s *Store, origin string) Origin {
 
 func TestRetain(t *testing.T) {
 	mk := func(id string, captured, activity time.Time) Checkpoint {
-		return Checkpoint{ID: id, CapturedAt: captured, SourceActivityAt: activity, ExpiresAt: activity.Add(ExpiryWindow)}
+		return Checkpoint{ID: id, CapturedAt: captured, SourceActivityAt: activity, ExpiresAt: activity.Add(ExpiryWindow), Completeness: Completeness{Complete: true}}
 	}
 	tests := []struct {
 		name string
@@ -636,7 +636,7 @@ func TestEchoedOwnBlockNeverOverridesOwnState(t *testing.T) {
 func TestRetainKeepsLastCompleteUnderMixed(t *testing.T) {
 	at := func(d time.Duration) time.Time { return t0.Add(-d) }
 	cp := func(id string, age time.Duration, deferred string) Checkpoint {
-		return Checkpoint{ID: id, CapturedAt: at(age), ExpiresAt: t0.Add(24 * time.Hour), Deferred: deferred}
+		return Checkpoint{ID: id, CapturedAt: at(age), ExpiresAt: t0.Add(24 * time.Hour), Deferred: deferred, Completeness: Completeness{Complete: true}}
 	}
 	kept := Retain([]Checkpoint{
 		cp("complete", 30*time.Minute, ""),

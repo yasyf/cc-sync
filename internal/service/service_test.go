@@ -412,7 +412,7 @@ func TestSelectors(t *testing.T) {
 		want string
 		code cli.Code
 	}{
-		{"latest skips mixed", cli.LatestCheckpoint{}, "aaa200", ""},
+		{"latest skips mixed and omitted", cli.LatestCheckpoint{}, "aaa100", ""},
 		{"id prefix", cli.CheckpointID{Prefix: "aaa3"}, "aaa300", ""},
 		{"ambiguous prefix", cli.CheckpointID{Prefix: "aaa"}, "", cli.CodeUsage},
 		{"unknown prefix", cli.CheckpointID{Prefix: "fff"}, "", cli.CodeNotFound},
@@ -425,7 +425,7 @@ func TestSelectors(t *testing.T) {
 	w := fixture().Origins[0].Worktrees[0]
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := pick(w, tt.sel, now)
+			got, err := view{now: now, snap: fixture()}.pick(laptop, w, tt.sel)
 			if tt.code != "" {
 				if cli.Classify(err) != tt.code {
 					t.Fatalf("code %q, want %q (err %v)", cli.Classify(err), tt.code, err)
@@ -586,6 +586,35 @@ func TestCheckoutDir(t *testing.T) {
 			}
 			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
 				t.Fatalf("Find = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAssurance(t *testing.T) {
+	snap := fixture()
+	snap.Carried = map[string]uint64{"ddd100": 5}
+	own := snap.Origins[2].Worktrees[0].Checkpoints[0]
+	incomplete := own
+	incomplete.Completeness = catalog.Completeness{Missing: []string{"session:x"}}
+	tests := []struct {
+		name  string
+		cp    catalog.Checkpoint
+		acked syncservice.Revision
+		at    time.Time
+		want  cli.Assurance
+	}{
+		{"never acked", own, "", now, cli.AssuranceNone},
+		{"acked before carried", own, "4", now, cli.AssuranceNone},
+		{"complete and acked", own, "5", now, cli.AssuranceDurable},
+		{"incomplete and acked", incomplete, "6", now, cli.AssuranceHeld},
+		{"expired", own, "5", own.ExpiresAt, cli.AssuranceNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := view{now: tt.at, snap: snap}.assurance(delivery.PeerStatus{Peer: laptop, Acked: tt.acked}, tt.cp)
+			if err != nil || got != tt.want {
+				t.Fatalf("assurance = %q, %v; want %q", got, err, tt.want)
 			}
 		})
 	}
