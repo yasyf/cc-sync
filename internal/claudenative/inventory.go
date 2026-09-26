@@ -89,15 +89,37 @@ type RepoResolver interface {
 	Resolve(ctx context.Context, cwd string) (RepoBinding, bool, error)
 }
 
-// FileCursor is Scan's memory of one transcript: its identity at the last
-// scan, how far complete records were folded, and what they said.
+// FileStamp identifies a file's contents without reading them: an append
+// grows Size in place, and any other write moves ModTime or ChangeTime.
+type FileStamp struct {
+	Inode      uint64
+	Size       int64
+	ModTime    time.Time
+	ChangeTime time.Time
+}
+
+// FileCursor is Scan's memory of one transcript: its stamp at the last scan,
+// how far complete records were folded, and what they said. Boundary hashes
+// the ends of the folded prefix, checked when the file grows in place.
+// SidecarDirs holds each recognized directory under the session dir, keyed
+// by its path relative to that dir, so a scan rereads only the directories
+// whose inode or mtime moved.
 type FileCursor struct {
-	Inode        uint64
-	Size         int64
-	ModTime      time.Time
+	FileStamp
 	ParsedOffset int64
+	Boundary     Digest
 	Summary      TranscriptSummary
-	Sidecars     SidecarSet
+	SidecarDirs  map[string]SidecarDir
+}
+
+// SidecarDir is one recognized sidecar directory as Scan last read it: its
+// identity, how many of its files count toward the SidecarSet, and the
+// subdirectories Scan descends into.
+type SidecarDir struct {
+	Inode   uint64
+	ModTime time.Time
+	Files   int
+	Subdirs []string
 }
 
 // HistoryState is what history.jsonl has said about one session so far.
@@ -107,11 +129,13 @@ type HistoryState struct {
 }
 
 // Cursor carries Scan state between runs; the zero Cursor forces a full scan.
+// HistoryStamp and HistoryBoundary track history.jsonl like a FileCursor.
 type Cursor struct {
-	Files         map[string]FileCursor
-	HistoryOffset int64
-	HistoryInode  uint64
-	History       map[SessionID]HistoryState
+	Files           map[string]FileCursor
+	HistoryOffset   int64
+	HistoryStamp    FileStamp
+	HistoryBoundary Digest
+	History         map[SessionID]HistoryState
 }
 
 // ScanOptions configure Scan. Repos and Live are optional: without them every
@@ -131,7 +155,19 @@ type transcriptFile struct {
 
 type scannedCopy struct {
 	transcriptFile
-	cursor FileCursor
+	cursor   FileCursor
+	sidecars SidecarSet
+}
+
+type sidecarTree struct {
+	root   string
+	nested bool
+	counts func(name string) bool
+}
+
+type sidecarWalk struct {
+	sessionDir string
+	prev, next map[string]SidecarDir
 }
 
 type historyLine struct {
@@ -143,8 +179,10 @@ type historyLine struct {
 }
 
 // Scan inventories every projects/*/<uuid>.jsonl, reading only transcript
-// bytes past each cursor's ParsedOffset (an inode change or a shrink forces a
-// reparse) and history.jsonl past HistoryOffset. It returns one Session per
+// bytes past each cursor's ParsedOffset and history.jsonl past HistoryOffset.
+// A file resumes there only when it grew in place and the ends of its parsed
+// prefix still hash the same; any other change to its stamp forces a
+// reparse, and an unchanged stamp is not read at all. It returns one Session per
 // id, sorted by id, preferring the copy in the project dir Claude would derive
 // from the session cwd, then the newest; the rest are reported as Duplicates.
 func Scan(ctx context.Context, opts ScanOptions, prev Cursor) ([]Session, Cursor, error) {
@@ -177,7 +215,7 @@ func Scan(ctx context.Context, opts ScanOptions, prev Cursor) ([]Session, Cursor
 		}
 		scanned := make([]scannedCopy, 0, len(copies[id]))
 		for _, f := range copies[id] {
-			fc, err := refreshTranscript(l, id, f, prev.Files[f.path])
+			fc, sidecars, err := refreshTranscript(l, id, f, prev.Files[f.path])
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
@@ -185,7 +223,7 @@ func Scan(ctx context.Context, opts ScanOptions, prev Cursor) ([]Session, Cursor
 				return nil, Cursor{}, err
 			}
 			next.Files[f.path] = fc
-			scanned = append(scanned, scannedCopy{transcriptFile: f, cursor: fc})
+			scanned = append(scanned, scannedCopy{transcriptFile: f, cursor: fc, sidecars: sidecars})
 		}
 		if len(scanned) == 0 {
 			continue
@@ -248,37 +286,52 @@ func listTranscripts(l Layout) (map[SessionID][]transcriptFile, error) {
 	return copies, nil
 }
 
-func refreshTranscript(l Layout, id SessionID, f transcriptFile, prev FileCursor) (FileCursor, error) {
-	inode := inodeOf(f.info)
-	size := f.info.Size()
+func refreshTranscript(l Layout, id SessionID, f transcriptFile, prev FileCursor) (FileCursor, SidecarSet, error) {
 	fc := prev
-	reset := prev.Inode != inode || size < prev.Size
-	if reset {
+	if stamp := stampOf(f.info); !stamp.unchangedSince(prev.FileStamp) {
+		var err error
+		if fc, err = refold(f.path, stamp, prev); err != nil {
+			return FileCursor{}, SidecarSet{}, err
+		}
+	}
+	sidecars, dirs, err := discoverSidecars(l, id, filepath.Join(filepath.Dir(f.path), string(id)), fc.Summary, prev.SidecarDirs)
+	if err != nil {
+		return FileCursor{}, SidecarSet{}, err
+	}
+	fc.SidecarDirs = dirs
+	return fc, sidecars, nil
+}
+
+func refold(path string, stamp FileStamp, prev FileCursor) (FileCursor, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: a transcript under the scanned Claude config dir, opened read-only.
+	if err != nil {
+		return FileCursor{}, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	appended, err := appendedTo(f, stamp, prev.FileStamp, prev.ParsedOffset, prev.Boundary)
+	if err != nil {
+		return FileCursor{}, err
+	}
+	fc := prev
+	if !appended {
 		fc = FileCursor{}
 	}
-	if reset || size != fc.Size {
-		summary := fc.Summary.clone()
-		end, err := foldCompleteLines(f.path, fc.ParsedOffset, size, func(line []byte) error {
-			r, ts, err := decodeRecord(line)
-			if err != nil {
-				return err
-			}
-			return summary.fold(&r, ts, line)
-		})
+	summary := fc.Summary.clone()
+	end, err := foldCompleteLines(f, fc.ParsedOffset, stamp.Size, func(line []byte) error {
+		r, ts, err := decodeRecord(line)
 		if err != nil {
-			return FileCursor{}, err
+			return err
 		}
-		fc.Summary, fc.ParsedOffset = summary, end
+		return summary.fold(&r, ts, line)
+	})
+	if err != nil {
+		return FileCursor{}, err
 	}
-	changed := fc.Inode != inode || fc.Size != size || !fc.ModTime.Equal(f.info.ModTime())
-	fc.Inode, fc.Size, fc.ModTime = inode, size, f.info.ModTime()
-	if changed {
-		sidecars, err := discoverSidecars(l, id, filepath.Join(filepath.Dir(f.path), string(id)), fc.Summary)
-		if err != nil {
-			return FileCursor{}, err
-		}
-		fc.Sidecars = sidecars
+	boundary, err := boundaryDigest(f, end)
+	if err != nil {
+		return FileCursor{}, err
 	}
+	fc.FileStamp, fc.Summary, fc.ParsedOffset, fc.Boundary = stamp, summary, end, boundary
 	return fc, nil
 }
 
@@ -318,7 +371,7 @@ func assemble(ctx context.Context, opts ScanOptions, id SessionID, copies []scan
 			Records:      sum.Records,
 			LeafUUID:     sum.LeafUUID,
 		},
-		Sidecars: c.cursor.Sidecars,
+		Sidecars: c.sidecars,
 	}
 	s.LastActivity = later(s.LastHumanInput, s.LastAutonomousActivity)
 	for _, dup := range copies[1:] {
@@ -351,76 +404,129 @@ func assemble(ctx context.Context, opts ScanOptions, id SessionID, copies []scan
 	return s, nil
 }
 
-func discoverSidecars(l Layout, id SessionID, sessionDir string, sum TranscriptSummary) (SidecarSet, error) {
+func discoverSidecars(l Layout, id SessionID, sessionDir string, sum TranscriptSummary, prev map[string]SidecarDir) (SidecarSet, map[string]SidecarDir, error) {
 	var s SidecarSet
 	var err error
+	w := sidecarWalk{sessionDir: sessionDir, prev: prev, next: make(map[string]SidecarDir)}
 	if s.SessionDir, err = isDir(sessionDir); err != nil {
-		return SidecarSet{}, err
+		return SidecarSet{}, nil, err
 	}
 	if s.SessionDir {
-		if err := countSessionTree(sessionDir, &s); err != nil {
-			return SidecarSet{}, err
+		for _, t := range []struct {
+			total *int
+			tree  sidecarTree
+		}{
+			{&s.Subagents, sidecarTree{root: "subagents", nested: true, counts: isAgentTranscript}},
+			{&s.ToolResults, sidecarTree{root: "tool-results", nested: true, counts: func(string) bool { return true }}},
+			{&s.Workflows, sidecarTree{root: "workflows", counts: isWorkflowManifest}},
+		} {
+			if *t.total, err = w.count(t.tree, t.tree.root); err != nil {
+				return SidecarSet{}, nil, err
+			}
 		}
 	}
 	if s.FileHistory, err = isDir(l.fileHistoryDir(id)); err != nil {
-		return SidecarSet{}, err
+		return SidecarSet{}, nil, err
 	}
-	candidates := append([]string{string(id), "session-" + string(id)[:8]}, sum.TeamNames...)
-	for _, listID := range candidates {
-		if !isPathElement(listID) {
-			continue
-		}
+	for _, listID := range taskListCandidates(id, sum) {
 		ok, err := isDir(l.taskListDir(listID))
 		if err != nil {
-			return SidecarSet{}, err
+			return SidecarSet{}, nil, err
 		}
 		if ok {
 			s.TaskLists = insertSorted(s.TaskLists, listID)
 		}
 	}
 	s.Plans = slices.Clone(sum.PlanFiles)
-	for _, slug := range sum.Slugs {
-		if !isPathElement(slug) {
-			continue
-		}
+	for _, slug := range planSlugs(sum) {
 		ok, err := isRegular(l.planPath(slug))
 		if err != nil {
-			return SidecarSet{}, err
+			return SidecarSet{}, nil, err
 		}
 		if ok {
 			s.Plans = insertSorted(s.Plans, l.planPath(slug))
 		}
 	}
-	return s, nil
+	return s, w.next, nil
 }
 
-func countSessionTree(dir string, s *SidecarSet) error {
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		switch {
-		case parts[0] == "subagents" && strings.HasPrefix(d.Name(), "agent-") && strings.HasSuffix(d.Name(), ".jsonl"):
-			s.Subagents++
-		case parts[0] == "tool-results":
-			s.ToolResults++
-		case parts[0] == "workflows" && len(parts) == 2 && strings.HasSuffix(d.Name(), ".json"):
-			s.Workflows++
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("walk session dir %s: %w", dir, err)
+func (w *sidecarWalk) count(t sidecarTree, rel string) (int, error) {
+	dir := filepath.Join(w.sessionDir, rel)
+	info, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
 	}
-	return nil
+	if err != nil {
+		return 0, fmt.Errorf("stat %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return 0, nil
+	}
+	d, cached := w.prev[rel]
+	if !cached || d.Inode != inodeOf(info) || !d.ModTime.Equal(info.ModTime()) {
+		d, err = t.read(dir, info)
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	w.next[rel] = d
+	n := d.Files
+	for _, sub := range d.Subdirs {
+		m, err := w.count(t, filepath.Join(rel, sub))
+		if err != nil {
+			return 0, err
+		}
+		n += m
+	}
+	return n, nil
+}
+
+func (t sidecarTree) read(dir string, info fs.FileInfo) (SidecarDir, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return SidecarDir{}, fmt.Errorf("read %s: %w", dir, err)
+	}
+	d := SidecarDir{Inode: inodeOf(info), ModTime: info.ModTime()}
+	for _, e := range entries {
+		switch {
+		case e.IsDir() && t.nested:
+			d.Subdirs = append(d.Subdirs, e.Name())
+		case !e.IsDir() && t.counts(e.Name()):
+			d.Files++
+		}
+	}
+	return d, nil
+}
+
+func isAgentTranscript(name string) bool {
+	return strings.HasPrefix(name, "agent-") && strings.HasSuffix(name, ".jsonl")
+}
+
+func isWorkflowManifest(name string) bool {
+	return strings.HasSuffix(name, ".json")
+}
+
+func taskListCandidates(id SessionID, sum TranscriptSummary) []string {
+	var ids []string
+	for _, listID := range append([]string{string(id), "session-" + string(id)[:8]}, sum.TeamNames...) {
+		if isPathElement(listID) {
+			ids = append(ids, listID)
+		}
+	}
+	return ids
+}
+
+func planSlugs(sum TranscriptSummary) []string {
+	var slugs []string
+	for _, slug := range sum.Slugs {
+		if isPathElement(slug) {
+			slugs = append(slugs, slug)
+		}
+	}
+	return slugs
 }
 
 func findScratchpad(l Layout, id SessionID, sum TranscriptSummary) (string, error) {
@@ -441,23 +547,32 @@ func findScratchpad(l Layout, id SessionID, sum TranscriptSummary) (string, erro
 }
 
 func tailHistory(l Layout, prev Cursor, next *Cursor) error {
-	path := l.historyPath()
-	info, err := os.Stat(path)
+	f, err := os.Open(l.historyPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		next.History = make(map[SessionID]HistoryState)
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("open history: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
 		return fmt.Errorf("stat history: %w", err)
 	}
-	inode := inodeOf(info)
-	from := prev.HistoryOffset
-	next.History = maps.Clone(prev.History)
-	if next.History == nil || inode != prev.HistoryInode || info.Size() < from {
-		from = 0
-		next.History = make(map[SessionID]HistoryState)
+	next.History, next.HistoryOffset, next.HistoryStamp, next.HistoryBoundary = maps.Clone(prev.History), prev.HistoryOffset, prev.HistoryStamp, prev.HistoryBoundary
+	stamp := stampOf(info)
+	if stamp.unchangedSince(prev.HistoryStamp) {
+		return nil
 	}
-	end, err := foldCompleteLines(path, from, info.Size(), func(line []byte) error {
+	appended, err := appendedTo(f, stamp, prev.HistoryStamp, prev.HistoryOffset, prev.HistoryBoundary)
+	if err != nil {
+		return err
+	}
+	if !appended {
+		next.History, next.HistoryOffset = make(map[SessionID]HistoryState), 0
+	}
+	end, err := foldCompleteLines(f, next.HistoryOffset, stamp.Size, func(line []byte) error {
 		var h historyLine
 		if err := json.Unmarshal(line, &h); err != nil {
 			return fmt.Errorf("decode history line: %w", err)
@@ -479,7 +594,11 @@ func tailHistory(l Layout, prev Cursor, next *Cursor) error {
 	if err != nil {
 		return err
 	}
-	next.HistoryOffset, next.HistoryInode = end, inode
+	boundary, err := boundaryDigest(f, end)
+	if err != nil {
+		return err
+	}
+	next.HistoryOffset, next.HistoryStamp, next.HistoryBoundary = end, stamp, boundary
 	return nil
 }
 
@@ -489,6 +608,18 @@ func isPathElement(name string) bool {
 
 func inodeOf(info fs.FileInfo) uint64 {
 	return info.Sys().(*syscall.Stat_t).Ino
+}
+
+func stampOf(info fs.FileInfo) FileStamp {
+	return FileStamp{Inode: inodeOf(info), Size: info.Size(), ModTime: info.ModTime(), ChangeTime: changeTime(info)}
+}
+
+func (s FileStamp) unchangedSince(prev FileStamp) bool {
+	return s.Inode == prev.Inode && s.Size == prev.Size && s.ModTime.Equal(prev.ModTime) && s.ChangeTime.Equal(prev.ChangeTime)
+}
+
+func (s FileStamp) grewFrom(prev FileStamp) bool {
+	return s.Inode == prev.Inode && s.Size > prev.Size
 }
 
 func isDir(path string) (bool, error) {
