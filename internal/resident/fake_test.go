@@ -78,6 +78,7 @@ type fakeMonitor struct {
 	mu      sync.Mutex
 	state   netpolicy.State
 	changed chan struct{}
+	reads   int
 	closed  bool
 }
 
@@ -95,7 +96,20 @@ func newFakeMonitor(state netpolicy.State) *fakeMonitor {
 func (m *fakeMonitor) Current() (netpolicy.State, <-chan struct{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reads++
 	return m.state, m.changed
+}
+
+func (m *fakeMonitor) awaitReads(n int) {
+	for {
+		m.mu.Lock()
+		reads := m.reads
+		m.mu.Unlock()
+		if reads >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (m *fakeMonitor) set(state netpolicy.State) {
@@ -104,6 +118,12 @@ func (m *fakeMonitor) set(state netpolicy.State) {
 	m.state = state
 	close(m.changed)
 	m.changed = make(chan struct{})
+}
+
+func (m *fakeMonitor) meter() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.ManualMetered = true
 }
 
 type fakeInventory struct {

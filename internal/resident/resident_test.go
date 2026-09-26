@@ -220,3 +220,111 @@ func TestVerifyLoop(t *testing.T) {
 		t.Errorf("verifyLoop = %v, want context.Canceled", err)
 	}
 }
+
+func TestVerifyLoopCancelsInFlightFetchOnRestriction(t *testing.T) {
+	tests := []struct {
+		name     string
+		restrict func(*fakeMonitor)
+		within   time.Duration
+		reason   string
+	}{
+		{
+			name:     "cellular",
+			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}) },
+			within:   time.Second,
+			reason:   "local: cellular",
+		},
+		{
+			name:     "disconnected",
+			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusDisconnected}) },
+			within:   time.Second,
+			reason:   "local: disconnected",
+		},
+		{
+			name:     "unknown",
+			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusUnknown}) },
+			within:   time.Second,
+			reason:   "local: unknown",
+		},
+		{
+			name:     "manual metered without a path change",
+			restrict: (*fakeMonitor).meter,
+			within:   policyPoll + time.Second,
+			reason:   "local: manual metered",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			monitor := newFakeMonitor(unrestricted)
+			ctx, cancel := context.WithCancel(t.Context())
+			entered := make(chan struct{})
+			cancelled := make(chan error, 1)
+			done := make(chan error, 1)
+			go func() {
+				done <- verifyLoop(ctx, monitor, time.Hour, make(chan struct{}), func(fetchCtx context.Context) error {
+					close(entered)
+					<-fetchCtx.Done()
+					cancelled <- context.Cause(fetchCtx)
+					return fetchCtx.Err()
+				})
+			}()
+			<-entered
+			monitor.awaitReads(2)
+			tt.restrict(monitor)
+			select {
+			case cause := <-cancelled:
+				var paused *netpolicy.PausedError
+				if !errors.As(cause, &paused) || paused.Reason != tt.reason {
+					t.Errorf("in-flight fetch cancelled with cause %v, want a pause for %q", cause, tt.reason)
+				}
+			case <-time.After(tt.within):
+				t.Errorf("in-flight prerequisite fetch was not cancelled within %v of the restriction", tt.within)
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Errorf("verifyLoop = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestVerifyLoopResumesWhenUnrestricted(t *testing.T) {
+	monitor := newFakeMonitor(unrestricted)
+	ctx, cancel := context.WithCancel(t.Context())
+	calls := make(chan int, 8)
+	var n atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- verifyLoop(ctx, monitor, time.Hour, make(chan struct{}), func(fetchCtx context.Context) error {
+			call := int(n.Add(1))
+			calls <- call
+			if call > 1 {
+				return nil
+			}
+			<-fetchCtx.Done()
+			return fetchCtx.Err()
+		})
+	}()
+	if call := <-calls; call != 1 {
+		t.Fatalf("first verification = call %d, want 1", call)
+	}
+	monitor.set(netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true})
+	select {
+	case call := <-calls:
+		t.Fatalf("verification %d started while the network was cellular", call)
+	case <-time.After(100 * time.Millisecond):
+	}
+	monitor.set(unrestricted)
+	select {
+	case call := <-calls:
+		if call != 2 {
+			t.Fatalf("resumed verification = call %d, want 2", call)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred verification did not resume after the network became unrestricted")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("verifyLoop = %v, want context.Canceled", err)
+	}
+}

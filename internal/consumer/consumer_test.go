@@ -15,6 +15,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/netpolicy"
 	"github.com/yasyf/synckit/syncservice"
 )
 
@@ -60,6 +61,12 @@ func (f *fakeVerifier) VerifyCode(_ context.Context, root artifact.Ref, fetchOri
 		return v, nil
 	}
 	return CodeVerdict{Ready: true}, nil
+}
+
+type verifierFunc func(context.Context, artifact.Ref, bool) (CodeVerdict, error)
+
+func (f verifierFunc) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin bool) (CodeVerdict, error) {
+	return f(ctx, root, fetchOrigin)
 }
 
 type countingPublisher struct{ n int }
@@ -459,6 +466,63 @@ func TestVerifyDeferredFetchesOnlyWhenAllowed(t *testing.T) {
 	res, err = b.consumer.ApplyArtifacts(t.Context(), change, []artifact.Ref{ref("r1")})
 	if err != nil || res != (syncservice.ApplyResult{AckedRevision: change.SourceRevision}) || len(b.verifier.calls) != 2 {
 		t.Fatalf("redelivery = %+v, %v after %d verifications; want a full ack without re-verifying", res, err, len(b.verifier.calls))
+	}
+}
+
+func TestSettleRechecksFetchPolicy(t *testing.T) {
+	h := newHost(t, "b")
+	h.fetch = true
+	points := []catalog.Checkpoint{point("r1", t0, 1), point("r2", t0, 1)}
+	for _, cp := range points {
+		h.artifacts.complete[cp.Root.Digest] = true
+	}
+	fetches := 0
+	h.consumer.cfg.Verifier = verifierFunc(func(_ context.Context, _ artifact.Ref, fetch bool) (CodeVerdict, error) {
+		if fetch {
+			fetches++
+		}
+		h.fetch = false
+		return CodeVerdict{Ready: true}, nil
+	})
+	evidence := catalog.Evidence{Roots: map[artifact.Digest]bool{}, Verified: map[string]catalog.Readiness{}}
+	if err := h.consumer.settle(t.Context(), points, evidence, true); err != nil {
+		t.Fatal(err)
+	}
+	if fetches != 1 {
+		t.Fatalf("started %d network-enabled verifications after policy changed; want 1", fetches)
+	}
+}
+
+func TestVerifyDeferredPolicyCancelKeepsCheckpointDeferred(t *testing.T) {
+	a, b := newHost(t, "a"), newHost(t, "b")
+	id := a.record(t, "w1", "r1", t0).ID
+	change := a.export(t)
+	b.verifier.verdicts[ref("r1").Digest] = CodeVerdict{Missing: []string{"trunk base 1234"}}
+	if res, err := b.consumer.ApplyArtifacts(t.Context(), change, []artifact.Ref{ref("r1")}); err != nil || !res.Partial {
+		t.Fatalf("apply = %+v, %v; want Partial", res, err)
+	}
+	b.artifacts.complete[ref("r1").Digest] = true
+	b.fetch = true
+	deferred := catalog.Readiness{Missing: []string{"trunk base 1234"}, Deferred: catalog.MissingPrerequisites}
+	ctx, pause := context.WithCancelCause(t.Context())
+	b.consumer.cfg.Verifier = verifierFunc(func(context.Context, artifact.Ref, bool) (CodeVerdict, error) {
+		pause(&netpolicy.PausedError{Reason: "local: cellular"})
+		return CodeVerdict{}, errors.New("fetch origin main: signal: killed")
+	})
+	published := b.publisher.n
+	if err := b.consumer.VerifyDeferred(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("VerifyDeferred = %v, want context.Canceled", err)
+	}
+	snap, err := b.catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snap.ReadinessOf("a", catalog.Checkpoint{ID: id}); !reflect.DeepEqual(got, deferred) || b.publisher.n != published {
+		t.Fatalf("readiness after a policy-cancelled fetch = %+v with %d publishes; want %+v and none", got, b.publisher.n-published, deferred)
+	}
+	pending, err := b.catalog.Pending()
+	if err != nil || len(pending) != 1 || pending[0].ID != id {
+		t.Fatalf("pending after a policy-cancelled fetch = %+v, %v; want %s still pending", pending, err, id)
 	}
 }
 

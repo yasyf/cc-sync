@@ -79,7 +79,8 @@ type Publisher interface {
 }
 
 // Config wires a Consumer. FetchAllowed reports whether network policy
-// currently allows a bulk origin fetch; only VerifyDeferred consults it.
+// currently allows a bulk origin fetch; only VerifyDeferred consults it,
+// immediately before each verification that may fetch.
 type Config struct {
 	Catalog      *catalog.Store
 	Publisher    Publisher
@@ -218,9 +219,12 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 // VerifyDeferred is the resident's background half of verification, run
 // outside any apply: it re-checks the artifact closure of every held relayed
 // checkpoint not yet ready, relays every held block that is now
-// artifact-complete, and, when network policy allows an origin fetch,
-// verifies each closure-complete checkpoint with that fetch. It then
-// publishes, so the next delivery of a waiting change can acknowledge it.
+// artifact-complete, and verifies each closure-complete checkpoint with an
+// origin fetch while network policy allows one, re-checking the policy before
+// each. It then publishes, so the next delivery of a waiting change can
+// acknowledge it. A ctx cancelled mid-pass, as when network policy turns
+// restrictive under a fetch, records nothing and leaves every checkpoint
+// deferred as it was.
 func (c *Consumer) VerifyDeferred(ctx context.Context) error {
 	pending, err := c.cfg.Catalog.Pending()
 	if err != nil {
@@ -237,7 +241,6 @@ func (c *Consumer) VerifyDeferred(ctx context.Context) error {
 }
 
 func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evidence catalog.Evidence, background bool) error {
-	fetch := background && c.cfg.FetchAllowed()
 	for _, cp := range pending {
 		if !evidence.Roots[cp.Root.Digest] {
 			missing, err := c.cfg.Artifacts.Complete(ctx, []artifact.Ref{cp.Root})
@@ -246,10 +249,10 @@ func (c *Consumer) settle(ctx context.Context, pending []catalog.Checkpoint, evi
 			}
 			evidence.Roots[cp.Root.Digest] = missing == 0
 		}
-		if !evidence.Roots[cp.Root.Digest] || background && !fetch {
+		if !evidence.Roots[cp.Root.Digest] || background && !c.cfg.FetchAllowed() {
 			continue
 		}
-		verdict, err := c.cfg.Verifier.VerifyCode(ctx, cp.Root, fetch)
+		verdict, err := c.cfg.Verifier.VerifyCode(ctx, cp.Root, background)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
