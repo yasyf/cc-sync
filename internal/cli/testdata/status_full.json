@@ -16,6 +16,10 @@
       "manual_metered": false
     }
   },
+  "delivery": {
+    "available": true,
+    "reason": ""
+  },
   "peers": [
     {
       "host_id": "host-mbp",

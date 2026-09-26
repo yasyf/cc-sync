@@ -97,6 +97,7 @@ func TestHumanGolden(t *testing.T) {
 		args []string
 	}{
 		{"status", &fakeService{status: fullStatus()}, []string{"status"}},
+		{"status_degraded", &fakeService{status: degradedStatus()}, []string{"status"}},
 		{"list", &fakeService{list: cli.ListResult{Items: []cli.Item{fullItem(), deferredItem(), sparseItem()}}}, []string{"list"}},
 		{"list_empty", &fakeService{}, []string{"list"}},
 		{"inspect", &fakeService{inspect: fullInspect()}, []string{"inspect", "host-mbp/wt-7f3a"}},

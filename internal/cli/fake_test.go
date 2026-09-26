@@ -243,6 +243,7 @@ func fullStatus() cli.StatusResult {
 			Host:    cli.Host{HostID: "host-air", HostName: "air"},
 			Network: cli.Network{Status: cli.NetworkConnected, Expensive: true, Cellular: true},
 		},
+		Delivery: cli.DeliveryService{Available: true},
 		Peers: []cli.Peer{
 			{
 				Host:            cli.Host{HostID: "host-mbp", HostName: "mbp"},
@@ -270,6 +271,13 @@ func fullStatus() cli.StatusResult {
 			},
 		},
 	}
+}
+
+func degradedStatus() cli.StatusResult {
+	res := fullStatus()
+	res.Delivery = cli.DeliveryService{Reason: "synckitd too old; upgrade synckit"}
+	res.Peers = []cli.Peer{{Host: cli.Host{HostID: "host-mbp", HostName: "mbp"}}, {Host: cli.Host{HostID: "host-mini", HostName: "mini"}}}
+	return res
 }
 
 func fullInspect() cli.InspectResult {

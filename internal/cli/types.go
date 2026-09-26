@@ -288,12 +288,20 @@ type Scheduler struct {
 	Tiers        CaptureTiers `json:"tiers"`
 }
 
+// DeliveryService reports whether synckitd answered for per-peer delivery;
+// Reason says why not when it did not, and Peers then carry no delivery state.
+type DeliveryService struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
 // StatusResult is the payload of `cc-sync status`.
 type StatusResult struct {
-	Helper    Helper      `json:"helper"`
-	Local     LocalHost   `json:"local"`
-	Peers     Array[Peer] `json:"peers"`
-	Scheduler Scheduler   `json:"scheduler"`
+	Helper    Helper          `json:"helper"`
+	Local     LocalHost       `json:"local"`
+	Delivery  DeliveryService `json:"delivery"`
+	Peers     Array[Peer]     `json:"peers"`
+	Scheduler Scheduler       `json:"scheduler"`
 }
 
 // Source is the host that captured an item.
