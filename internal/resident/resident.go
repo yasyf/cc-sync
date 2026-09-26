@@ -27,9 +27,14 @@ import (
 	"github.com/yasyf/synckit/syncservice"
 )
 
-// DefaultVerifyInterval is how often the background verifier retries
-// deferred checkpoints while network policy allows an origin fetch.
-const DefaultVerifyInterval = 5 * time.Minute
+const (
+	// DefaultVerifyInterval is how often the background verifier retries
+	// deferred checkpoints while network policy allows an origin fetch.
+	DefaultVerifyInterval = 5 * time.Minute
+	// DefaultExpireInterval is how often the capture pipeline's expired
+	// partial-capture pins are dropped.
+	DefaultExpireInterval = 15 * time.Minute
+)
 
 // Store is the slice of the synckit artifact store the resident itself
 // drives; the capture pipeline receives the concrete store.
@@ -40,6 +45,7 @@ type Store interface {
 
 // Capture is what the capture pipeline builds on.
 type Capture[S Store] struct {
+	Self      string
 	Layout    config.Layout
 	Config    config.Config
 	Artifacts S
@@ -49,12 +55,18 @@ type Capture[S Store] struct {
 	Monitor   netpolicy.Monitor
 }
 
+// PinExpirer drops the capture pipeline's expired partial-capture pins.
+type PinExpirer interface {
+	ExpirePins(ctx context.Context) error
+}
+
 // Pipeline is the capture and verification surface the resident schedules.
 type Pipeline struct {
 	Inventory scheduler.Inventory
 	Stamper   scheduler.Stamper
 	Capturer  scheduler.Capturer
 	Verifier  consumer.CodeVerifier
+	Expirer   PinExpirer
 }
 
 // Deps injects everything Prepare does not construct itself. Register is
@@ -68,6 +80,7 @@ type Deps[S Store] struct {
 	Register       func(*rpc.Dispatcher, syncservice.ArtifactConsumer, S, netpolicy.Monitor)
 	Pipeline       func(Capture[S]) (Pipeline, error)
 	VerifyInterval time.Duration
+	ExpireInterval time.Duration
 }
 
 // Resident is the prepared helper product.
@@ -175,7 +188,7 @@ func Prepare[S Store](ctx context.Context, d *rpc.Dispatcher, deps Deps[S], stop
 		}
 	}()
 	pipeline, err := deps.Pipeline(Capture[S]{
-		Layout: layout, Config: cfg, Artifacts: store, Code: code,
+		Self: deps.Self, Layout: layout, Config: cfg, Artifacts: store, Code: code,
 		Catalog: cat, Publisher: publisher, Monitor: monitor,
 	})
 	if err != nil {
@@ -213,6 +226,9 @@ func Prepare[S Store](ctx context.Context, d *rpc.Dispatcher, deps Deps[S], stop
 	group.Go(func() error { return sched.Run(groupCtx) })
 	group.Go(func() error {
 		return verifyLoop(groupCtx, monitor, cmp.Or(deps.VerifyInterval, DefaultVerifyInterval), nudges, svc.VerifyDeferred)
+	})
+	group.Go(func() error {
+		return expireLoop(groupCtx, cmp.Or(deps.ExpireInterval, DefaultExpireInterval), pipeline.Expirer.ExpirePins)
 	})
 	r := &Resident{store: store, monitor: monitor, scheduler: sched, cancel: cancel, done: make(chan struct{})}
 	go func() {
@@ -301,6 +317,24 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 		case <-ticker.C:
 		case <-nudges:
 		case <-changed:
+		}
+	}
+}
+
+func expireLoop(ctx context.Context, interval time.Duration, expire func(context.Context) error) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if err := expire(ctx); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.Warn("expiring partial-capture pins failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }
