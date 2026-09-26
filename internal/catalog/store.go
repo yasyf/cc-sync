@@ -36,6 +36,9 @@ const (
 var (
 	// ErrExpired reports a recorded checkpoint that expired before retention.
 	ErrExpired = errors.New("catalog: checkpoint already expired")
+	// ErrSuperseded reports a recorded checkpoint that claims no retention
+	// class because newer checkpoints of its worktree already hold them.
+	ErrSuperseded = errors.New("catalog: checkpoint superseded")
 	// ErrOriginBlockConflict refuses a change carrying an origin block at a
 	// revision this host already holds with different content.
 	ErrOriginBlockConflict = errors.New("catalog: origin-block-conflict")
@@ -240,7 +243,8 @@ func (s *Store) Load() (Snapshot, error) {
 // Record adds or replaces cp in this host's block under worktree wt, applies
 // retention to that worktree, and clears any tombstone for it, moving the
 // block revision only when the block changes. It derives the checkpoint's
-// ID, expiry, and classes and returns the checkpoint as retained.
+// ID, expiry, and classes and returns the checkpoint as retained. A record
+// makes its checkpoint the newest of those captured at the same instant.
 func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpoint, error) {
 	cp = normalized(s.self, wt.ID, cp)
 	var recorded Checkpoint
@@ -261,11 +265,18 @@ func (s *Store) Record(ctx context.Context, wt Worktree, cp Checkpoint) (Checkpo
 			orca.Freshness = orca.Freshness.UTC()
 			w.Orca = &orca
 		}
+		cp.Revision = nextRevision(own.Revision, now)
+		if k := slices.IndexFunc(w.Checkpoints, func(c Checkpoint) bool { return c.CapturedAt.Equal(cp.CapturedAt) }); k >= 0 && w.Checkpoints[k].ID == cp.ID {
+			cp.Revision = w.Checkpoints[k].Revision
+		}
 		others := slices.DeleteFunc(w.Checkpoints, func(c Checkpoint) bool { return c.ID == cp.ID })
 		w.Checkpoints = Retain(append(others, cp), now)
 		j := slices.IndexFunc(w.Checkpoints, func(c Checkpoint) bool { return c.ID == cp.ID })
-		if j < 0 {
+		switch {
+		case j < 0 && !now.Before(cp.ExpiresAt):
 			return false, fmt.Errorf("%w: %s expired at %s", ErrExpired, cp.ID, cp.ExpiresAt)
+		case j < 0:
+			return false, fmt.Errorf("%w: %s captured at %s holds no class beside newer checkpoints of %s", ErrSuperseded, cp.ID, cp.CapturedAt, wt.ID)
 		}
 		recorded = w.Checkpoints[j]
 		own.Tombstones = slices.DeleteFunc(own.Tombstones, func(t Tombstone) bool { return t.ID == wt.ID })

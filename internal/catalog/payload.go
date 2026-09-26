@@ -95,8 +95,11 @@ type Orca struct {
 
 // Checkpoint is one captured state of a worktree: Root is the artifact group
 // holding its code manifest, Orca descriptor, and session manifests.
+// Revision is the origin block revision that recorded it; of two checkpoints
+// captured at the same instant, the higher revision is the newer.
 type Checkpoint struct {
 	ID               string           `json:"id"`
+	Revision         uint64           `json:"revision"`
 	Root             artifact.Ref     `json:"root"`
 	Classes          []Class          `json:"classes"`
 	CapturedAt       time.Time        `json:"captured_at"`
@@ -184,7 +187,7 @@ func (o Origin) Validate() error {
 		return fmt.Errorf("origin %s tombstones: %w", o.Origin, err)
 	}
 	for _, w := range o.Worktrees {
-		if err := w.validate(o.Origin); err != nil {
+		if err := w.validate(o.Origin, o.Revision); err != nil {
 			return err
 		}
 	}
@@ -199,7 +202,7 @@ func (o Origin) Validate() error {
 	return nil
 }
 
-func (w Worktree) validate(origin string) error {
+func (w Worktree) validate(origin string, revision uint64) error {
 	if w.ID == "" || w.Repo.Origin == "" || w.Repo.SourcePath == "" || len(w.Checkpoints) == 0 {
 		return fmt.Errorf("%w: origin %s worktree %q", ErrInvalid, origin, w.ID)
 	}
@@ -212,14 +215,14 @@ func (w Worktree) validate(origin string) error {
 			return fmt.Errorf("%w: origin %s worktree %s repeats checkpoint %s", ErrInvalid, origin, w.ID, cp.ID)
 		}
 		seen[cp.ID] = true
-		if err := cp.validate(origin, w.ID); err != nil {
+		if err := cp.validate(origin, w.ID, revision); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (cp Checkpoint) validate(origin, worktreeID string) error {
+func (cp Checkpoint) validate(origin, worktreeID string, revision uint64) error {
 	if err := cp.Root.Validate(); err != nil {
 		return fmt.Errorf("checkpoint %s root: %w", cp.ID, err)
 	}
@@ -228,6 +231,8 @@ func (cp Checkpoint) validate(origin, worktreeID string) error {
 		return fmt.Errorf("%w: checkpoint %s root is a %s", ErrInvalid, cp.ID, cp.Root.Kind)
 	case cp.ID != CheckpointID(origin, worktreeID, cp.Root):
 		return fmt.Errorf("%w: checkpoint id %s does not derive from its root", ErrInvalid, cp.ID)
+	case cp.Revision == 0 || cp.Revision > revision:
+		return fmt.Errorf("%w: checkpoint %s revision %d outside its block's %d", ErrInvalid, cp.ID, cp.Revision, revision)
 	case cp.CapturedAt.IsZero() || cp.SourceActivityAt.IsZero():
 		return fmt.Errorf("%w: checkpoint %s lacks capture or activity time", ErrInvalid, cp.ID)
 	case !cp.ExpiresAt.Equal(cp.SourceActivityAt.Add(ExpiryWindow)):
@@ -281,7 +286,7 @@ func canonicalClasses(classes []Class) bool {
 }
 
 func compareCheckpoints(a, b Checkpoint) int {
-	return cmp.Or(b.CapturedAt.Compare(a.CapturedAt), strings.Compare(a.ID, b.ID))
+	return cmp.Or(b.CapturedAt.Compare(a.CapturedAt), cmp.Compare(b.Revision, a.Revision), strings.Compare(a.ID, b.ID))
 }
 
 func findWorktree(worktrees []Worktree, id string) (int, bool) {
