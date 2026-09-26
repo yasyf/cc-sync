@@ -43,7 +43,10 @@ const (
 		"SPILL: the last line of the saved Bash output. PLAN: the plan token written in the plan file."
 )
 
-var spend = &spendMeter{}
+var (
+	spend   = &spendMeter{}
+	applyMu sync.Mutex
+)
 
 type spendMeter struct {
 	mu  sync.Mutex
@@ -241,16 +244,21 @@ func (a *acceptance) restore(t *testing.T, replica string, layout claudenative.L
 	if plan.Mode != sessionrestore.ModeFresh || string(plan.SessionID) != string(plan.Meta.SessionID) {
 		t.Fatalf("plan mode %s id %s, want a fresh install under the source id %s", plan.Mode, plan.SessionID, plan.Meta.SessionID)
 	}
-	res, err := sessionrestore.Apply(t.Context(), plan)
-	if err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	t.Logf("installed %d units, rewritten %d, stripped %d, dropped tail %d, unmapped %d", len(res.Installed), plan.Rewritten, plan.Stripped, plan.DroppedTailBytes, len(plan.Unmapped))
 	staging := filepath.Join(layout.ConfigDir, ".cc-sync-staging")
-	if entries, err := os.ReadDir(staging); err == nil && len(entries) > 0 {
-		t.Errorf("apply left staging entries under %s: %v", staging, entries)
-	}
-	_ = os.Remove(staging)
+	var res sessionrestore.Result
+	func() {
+		applyMu.Lock()
+		defer applyMu.Unlock()
+		before := entryNames(t, staging)
+		var err error
+		if res, err = sessionrestore.Apply(t.Context(), plan); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		if after := entryNames(t, staging); (before == nil) != (after == nil) || !slices.Equal(before, after) {
+			t.Errorf("apply changed the staging entries under %s from %q to %q", staging, before, after)
+		}
+	}()
+	t.Logf("installed %d units, rewritten %d, stripped %d, dropped tail %d, unmapped %d", len(res.Installed), plan.Rewritten, plan.Stripped, plan.DroppedTailBytes, len(plan.Unmapped))
 	return plan
 }
 
@@ -316,6 +324,9 @@ func TestNativeAcceptance(t *testing.T) {
 		if alt == "" {
 			t.Skipf("NOT-COVERED: %s names no authenticated alternate CLAUDE_CONFIG_DIR; cc-pool lists no accounts and discovering one needs keychain access this harness never takes", altConfigEnv)
 		}
+		if sameDir(t, alt, a.configDir) {
+			t.Fatalf("%s=%s resolves to the source config dir %s; the cross-config scenario needs a distinct authenticated CLAUDE_CONFIG_DIR", altConfigEnv, alt, a.configDir)
+		}
 		a.artifactScenario(t, claudenative.Layout{ConfigDir: alt, TmpRoot: a.layout.TmpRoot, UID: a.layout.UID}, "cross-config "+unicodeDir)
 	})
 
@@ -376,7 +387,8 @@ func (a *acceptance) artifactScenario(t *testing.T, dstLayout claudenative.Layou
 		a.track(t, dstLayout.ConfigDir, s.sid)
 	}
 	replica := a.capture(t, s)
-	sourceEnv := environmentLines(readFile(t, filepath.Join(replica, "transcript.jsonl")))
+	sourceTranscript := readFile(t, filepath.Join(replica, "transcript.jsonl"))
+	sourceEnv := environmentLines(sourceTranscript)
 	a.removeSource(t, s)
 	plan := a.restore(t, replica, dstLayout, dst)
 	dstProject := filepath.Join(claudenative.ProjectsDir(dstLayout.ConfigDir), claudenative.ProjectDirName(dst))
@@ -397,16 +409,9 @@ func (a *acceptance) artifactScenario(t *testing.T, dstLayout claudenative.Layou
 				t.Errorf("environment payload not installed verbatim: %s", env)
 			}
 		}
-		for _, p := range stringsAt(t, installed, "persistedOutputPath") {
-			if !strings.HasPrefix(p, dstResults+"/") {
-				t.Errorf("persistedOutputPath %s not relocated under %s", p, dstResults)
-			}
-		}
-		for _, p := range stringsAt(t, installed, "planFilePath") {
-			if p != dstPlan {
-				t.Errorf("planFilePath %s, want %s", p, dstPlan)
-			}
-		}
+		srcResults := filepath.Join(claudenative.SessionDir(a.configDir, s.cwd, claudenative.SessionID(s.sid)), "tool-results")
+		relocatedValues(t, sourceTranscript, installed, "persistedOutputPath", srcResults, dstResults)
+		relocatedValues(t, sourceTranscript, installed, "planFilePath", filepath.Join(a.configDir, "plans"), filepath.Join(dstLayout.ConfigDir, "plans"))
 		for _, want := range []string{dstPlan, dstResults} {
 			if _, err := os.Stat(want); err != nil {
 				t.Errorf("relocated artifact missing: %v", err)
@@ -711,6 +716,35 @@ func tail(s string, n int) string {
 	return s[len(s)-n:]
 }
 
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ai, err := os.Stat(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(ai, bi)
+}
+
+func entryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
 func copiesIn(t *testing.T, configDir, sid string) []string {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(claudenative.ProjectsDir(configDir), "*", sid+".jsonl"))
@@ -841,6 +875,25 @@ func stringsAt(t *testing.T, data []byte, key string) []string {
 		visit(rec)
 	}
 	return out
+}
+
+func relocatedValues(t *testing.T, source, installed []byte, key, from, to string) {
+	t.Helper()
+	var want []string
+	for _, p := range stringsAt(t, source, key) {
+		rel, ok := strings.CutPrefix(p, from+"/")
+		if !ok {
+			t.Errorf("source %s %s is not under %s", key, p, from)
+			continue
+		}
+		want = append(want, to+"/"+rel)
+	}
+	got := stringsAt(t, installed, key)
+	slices.Sort(want)
+	slices.Sort(got)
+	if len(want) == 0 || !slices.Equal(got, want) {
+		t.Errorf("installed %s values %q, want %q: every source value relocated from %s to %s", key, got, want, from, to)
+	}
 }
 
 func planPaths(t *testing.T, transcript []byte) []string {
