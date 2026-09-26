@@ -108,6 +108,8 @@ func TestExitCodes(t *testing.T) {
 		{cli.CodeNotFound, 3},
 		{cli.CodeNotReady, 4},
 		{cli.CodeLiveLocalCollision, 4},
+		{cli.CodeDivergentLocalCopy, 4},
+		{cli.CodeIncompatible, 4},
 		{cli.CodeOrcaNotLocal, 4},
 		{cli.CodeCheckoutConflict, 4},
 		{cli.CodeUnsupported, 4},

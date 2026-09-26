@@ -6,20 +6,59 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"os/exec"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/yasyf/cc-sync/internal/version"
 )
 
 type app struct {
 	svc  Service
+	term Terminal
 	json bool
+}
+
+// Terminal is the process surface an interactive pickup hands to claude.
+// Interactive reports whether stdin and stdout are both terminals, Environ is
+// the environment a launched session starts from, and Exec replaces the
+// process with argv run in dir under env, returning only on failure.
+type Terminal struct {
+	Interactive bool
+	Environ     []string
+	Exec        func(argv []string, dir string, env []string) error
+}
+
+// ProcessTerminal is this process's Terminal, execing with syscall.Exec.
+func ProcessTerminal() Terminal {
+	return Terminal{
+		Interactive: isTerminal(os.Stdin) && isTerminal(os.Stdout),
+		Environ:     os.Environ(),
+		Exec:        execIn,
+	}
+}
+
+func isTerminal(f *os.File) bool {
+	return term.IsTerminal(int(f.Fd()))
+}
+
+func execIn(argv []string, dir string, env []string) error {
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("enter %s: %w", dir, err)
+	}
+	path, err := exec.LookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("find %s: %w", argv[0], err)
+	}
+	return fmt.Errorf("exec %s: %w", path, syscall.Exec(path, argv, env)) //nolint:gosec // G204: argv is the pickup launch of the destination claude, exec'd directly and never through a shell.
 }
 
 // Command is the cc-sync command line bound to a Service.
@@ -28,16 +67,17 @@ type Command struct {
 	root *cobra.Command
 }
 
-// New builds the cc-sync command line over svc.
-func New(svc Service) *Command {
-	a := &app{svc: svc}
+// New builds the cc-sync command line over svc; an interactive pickup hands
+// the selected session to claude through term.
+func New(svc Service, term Terminal) *Command {
+	a := &app{svc: svc, term: term}
 	return &Command{app: a, root: a.rootCmd()}
 }
 
-// Execute runs cc-sync against svc with SIGINT and SIGTERM cancelling the
-// command's context, and returns the process exit code.
+// Execute runs cc-sync against svc on the process terminal with SIGINT and
+// SIGTERM cancelling the command's context, and returns the process exit code.
 func Execute(svc Service, args []string, stdout, stderr io.Writer) int {
-	c := New(svc)
+	c := New(svc, ProcessTerminal())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return c.Run(ctx, args, stdout, stderr)
@@ -59,10 +99,17 @@ func (c *Command) Run(ctx context.Context, args []string, stdout, stderr io.Writ
 		if werr := writeJSON(stdout, newFailure(code, err)); werr != nil {
 			slog.Error("write error envelope", "code", code, "err", werr)
 		}
-	} else if _, werr := fmt.Fprintf(stderr, "cc-sync: %v\n", err); werr != nil {
+	} else if _, werr := fmt.Fprintf(stderr, "cc-sync: %v\n%s", err, humanHint(code)); werr != nil {
 		slog.Error("write error", "code", code, "err", werr)
 	}
 	return code.ExitCode()
+}
+
+func humanHint(code Code) string {
+	if code == CodeDivergentLocalCopy {
+		return "cc-sync: re-run with --on-divergence keep-local, replace, or fork\n"
+	}
+	return ""
 }
 
 func requestsJSON(args []string) bool {
@@ -320,23 +367,84 @@ func (a *app) pickupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			interactive := a.interactive(req)
+			if interactive && req.NoOrca && len(req.Resume) > 1 {
+				return Errorf(CodeUsage, "--no-orca selects %s but one terminal resumes one session: pass one --resume, or --json for every session's launch", strings.Join(req.Resume, ", "))
+			}
 			req.Target, req.Checkpoint, req.Progress = target, sel, report
 			res, err := a.svc.Pickup(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
-			return a.emit(cmd, struct {
+			var launching *PickedSession
+			if interactive {
+				if launching, err = sessionToLaunch(res); err != nil {
+					return err
+				}
+			}
+			if err := a.emit(cmd, struct {
 				header
 				PickupResult
-			}{okHeader, res}, func(p *printer) { renderPickup(p, res) })
+			}{okHeader, res}, func(p *printer) { renderPickup(p, res, launching) }); err != nil {
+				return err
+			}
+			if launching == nil {
+				return nil
+			}
+			l := launching.Launch
+			return a.term.Exec(l.Argv, l.Dir, launchEnv(a.term.Environ, *l))
 		},
 	}
+	req.OnDivergence = DivergenceRefuse
 	cmd.Flags().StringVar(&checkpoint, "checkpoint", "latest", "latest, <id-prefix>, at:<RFC3339>, hourly:-<N>h, or daily:<YYYY-MM-DD>")
 	cmd.Flags().StringArrayVar(&req.Resume, "resume", nil, "resume this session id; others import dormant (repeatable)")
+	cmd.Flags().Var(&req.OnDivergence, "on-divergence", "when a local copy of a picked session diverged: refuse, keep-local, replace, or fork")
 	cmd.Flags().BoolVar(&req.NoOrca, "no-orca", false, "skip the Orca import")
 	cmd.Flags().BoolVar(&req.DryRun, "dry-run", false, "report what pickup would do without changing anything")
 	cmd.Flags().StringVar(&progress, "progress", "", "emit progress on stderr; the only format is ndjson")
 	return cmd
+}
+
+func (a *app) interactive(req PickupRequest) bool {
+	return a.term.Interactive && !a.json && !req.DryRun
+}
+
+func sessionToLaunch(res PickupResult) (*PickedSession, error) {
+	var pending []*PickedSession
+	for i := range res.Sessions {
+		if s := &res.Sessions[i]; s.Selected && s.Status != SessionResumed {
+			pending = append(pending, s)
+		}
+	}
+	switch len(pending) {
+	case 0:
+		return nil, nil
+	case 1:
+		if pending[0].Launch == nil {
+			return nil, Errorf(CodeInternal, "selected session %s has no launch", pending[0].SessionID)
+		}
+		return pending[0], nil
+	}
+	ids := make([]string, 0, len(pending))
+	for _, s := range pending {
+		ids = append(ids, s.SessionID)
+	}
+	return nil, Errorf(CodeUsage, "sessions %s are restored but not resumed and one terminal resumes one session: run cc-sync resume <session> for each", strings.Join(ids, ", "))
+}
+
+func launchEnv(base []string, l Launch) []string {
+	env := make([]string, 0, len(base)+len(l.EnvSet))
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		if _, set := l.EnvSet[name]; set || slices.Contains(l.EnvUnset, name) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	for _, name := range slices.Sorted(maps.Keys(l.EnvSet)) {
+		env = append(env, name+"="+l.EnvSet[name])
+	}
+	return env
 }
 
 func progressReporter(format string, stderr io.Writer) (func(Progress), error) {

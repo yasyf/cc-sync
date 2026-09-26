@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -30,6 +31,17 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 
 // String formats d as a Go duration.
 func (d Duration) String() string { return time.Duration(d).String() }
+
+// Env is a set of environment assignments that encodes nil as {}.
+type Env map[string]string
+
+// MarshalJSON encodes a nil Env as {}.
+func (e Env) MarshalJSON() ([]byte, error) {
+	if e == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(map[string]string(e))
+}
 
 // Array is a slice that encodes nil as [] so every JSON array is present.
 type Array[T any] []T
@@ -156,7 +168,38 @@ const (
 	SessionResumed  SessionStatus = "resumed"
 	SessionDormant  SessionStatus = "dormant"
 	SessionRestored SessionStatus = "restored"
+	SessionRefused  SessionStatus = "refused"
 )
+
+// Divergence is how pickup treats a local native copy of a picked session
+// that holds records the picked checkpoint lacks.
+type Divergence string
+
+// Divergence values: refuse leaves both histories apart, keep-local resumes
+// the local history, replace moves it aside for the picked one, and fork
+// installs the picked history under a new session id.
+const (
+	DivergenceRefuse    Divergence = "refuse"
+	DivergenceKeepLocal Divergence = "keep-local"
+	DivergenceReplace   Divergence = "replace"
+	DivergenceFork      Divergence = "fork"
+)
+
+// String returns d's flag spelling.
+func (d *Divergence) String() string { return string(*d) }
+
+// Set parses an --on-divergence value into d.
+func (d *Divergence) Set(s string) error {
+	switch v := Divergence(s); v {
+	case DivergenceRefuse, DivergenceKeepLocal, DivergenceReplace, DivergenceFork:
+		*d = v
+		return nil
+	}
+	return errors.New("want refuse, keep-local, replace, or fork")
+}
+
+// Type names the flag value in usage text.
+func (d *Divergence) Type() string { return "mode" }
 
 // Phase is one pickup step reported by --progress ndjson.
 type Phase string
@@ -371,10 +414,26 @@ type PickupCheckout struct {
 	Reused bool    `json:"reused"`
 }
 
-// PickedSession is one session's pickup outcome.
+// Launch is how to continue a restored session natively: run Argv in Dir with
+// the EnvUnset names removed from the environment and EnvSet assigned.
+type Launch struct {
+	Argv     Array[string] `json:"argv"`
+	Dir      string        `json:"dir"`
+	EnvUnset Array[string] `json:"env_unset"`
+	EnvSet   Env           `json:"env_set"`
+}
+
+// PickedSession is one session's pickup outcome. Selected marks the sessions
+// pickup was asked to resume; Launch is nil for a session with no native
+// launch, Reason names the code of a refused session, and ForkedFrom is the
+// source id of a session installed under a new id by --on-divergence=fork.
 type PickedSession struct {
-	SessionID string        `json:"session_id"`
-	Status    SessionStatus `json:"status"`
+	SessionID  string        `json:"session_id"`
+	Status     SessionStatus `json:"status"`
+	Selected   bool          `json:"selected"`
+	Reason     Code          `json:"reason,omitempty"`
+	Launch     *Launch       `json:"launch"`
+	ForkedFrom *string       `json:"forked_from,omitempty"`
 }
 
 // ResumedTab is a session Orca resumed into a tab.

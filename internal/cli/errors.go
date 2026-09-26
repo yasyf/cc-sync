@@ -16,6 +16,8 @@ const (
 	CodeNotFound           Code = "not-found"
 	CodeNotReady           Code = "not-ready"
 	CodeLiveLocalCollision Code = "live-local-collision"
+	CodeDivergentLocalCopy Code = "divergent-local-copy"
+	CodeIncompatible       Code = "incompatible"
 	CodeOrcaNotLocal       Code = "orca-not-local"
 	CodeCheckoutConflict   Code = "checkout-conflict"
 	CodeUnsupported        Code = "unsupported"
@@ -41,7 +43,7 @@ func (c Code) ExitCode() int {
 		return ExitUsage
 	case CodeNotFound:
 		return ExitNotFound
-	case CodeNotReady, CodeLiveLocalCollision, CodeOrcaNotLocal, CodeCheckoutConflict, CodeUnsupported:
+	case CodeNotReady, CodeLiveLocalCollision, CodeDivergentLocalCopy, CodeIncompatible, CodeOrcaNotLocal, CodeCheckoutConflict, CodeUnsupported:
 		return ExitRefused
 	case CodeOrcaUnavailable, CodeUnavailable:
 		return ExitUnavailable
@@ -51,11 +53,32 @@ func (c Code) ExitCode() int {
 	panic(fmt.Sprintf("cli: unknown code %q", c))
 }
 
-// Error is a command failure carrying its Code. Service implementations return
-// it (possibly wrapped) to choose the reported code and exit status.
+// Error is a command failure carrying its Code and, for some codes, the
+// Details its JSON envelope reports. Service implementations return it
+// (possibly wrapped) to choose the reported code and exit status.
 type Error struct {
-	Code Code
-	Err  error
+	Code    Code
+	Err     error
+	Details ErrorDetails
+}
+
+// ErrorDetails is the structured context a failure's JSON envelope carries
+// under error.details.
+type ErrorDetails interface{ errorDetails() }
+
+// DivergenceDetails describes a picked session whose local native copy holds
+// records the picked checkpoint lacks.
+type DivergenceDetails struct {
+	SessionID           string `json:"session_id"`
+	LocalLastActivityAt Time   `json:"local_last_activity_at"`
+	PickedCapturedAt    Time   `json:"picked_captured_at"`
+}
+
+func (DivergenceDetails) errorDetails() {}
+
+// DivergentLocalCopy is the divergent-local-copy failure for d, caused by err.
+func DivergentLocalCopy(d DivergenceDetails, err error) error {
+	return &Error{Code: CodeDivergentLocalCopy, Err: err, Details: d}
 }
 
 func (e *Error) Error() string { return e.Err.Error() }

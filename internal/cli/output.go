@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,8 +23,9 @@ type header struct {
 var okHeader = header{Version: outputVersion, OK: true}
 
 type failureDetail struct {
-	Code    Code   `json:"code"`
-	Message string `json:"message"`
+	Code    Code         `json:"code"`
+	Message string       `json:"message"`
+	Details ErrorDetails `json:"details,omitempty"`
 }
 
 type failure struct {
@@ -32,10 +34,14 @@ type failure struct {
 }
 
 func newFailure(code Code, err error) failure {
-	return failure{
+	f := failure{
 		header: header{Version: outputVersion, OK: false},
 		Error:  failureDetail{Code: code, Message: err.Error()},
 	}
+	if e, ok := errors.AsType[*Error](err); ok {
+		f.Error.Details = e.Details
+	}
+	return f
 }
 
 type listedItem struct {
@@ -256,21 +262,30 @@ func renderInspect(p *printer, res InspectResult) {
 	}
 }
 
-func renderPickup(p *printer, res PickupResult) {
+func renderPickup(p *printer, res PickupResult, launching *PickedSession) {
 	verb := "restored"
 	if res.Checkout.Reused {
 		verb = "reused"
 	}
 	p.printf("checkout %s: %s on %s\n", verb, res.Checkout.Path, formatOptional(res.Checkout.Branch, "(detached)"))
 	for _, s := range res.Sessions {
-		p.printf("session %s: %s\n", s.SessionID, s.Status)
+		line := fmt.Sprintf("session %s: %s", s.SessionID, s.Status)
+		if s.Reason != "" {
+			line += " (" + string(s.Reason) + ")"
+		}
+		if s.ForkedFrom != nil {
+			line += ", forked from " + *s.ForkedFrom
+		}
+		p.printf("%s\n", line)
 	}
 	if res.Orca != nil {
 		p.printf("orca worktree %s: %d resumed, %d dormant\n", res.Orca.WorktreeID, len(res.Orca.Resumed), len(res.Orca.Dormant))
-		return
 	}
 	for _, s := range res.Sessions {
-		if s.Status != SessionResumed {
+		switch {
+		case launching != nil && s.SessionID == launching.SessionID:
+			p.printf("resuming %s with claude in %s\n", s.SessionID, s.Launch.Dir)
+		case res.Orca == nil && s.Status == SessionRestored:
 			p.printf("resume with: cc-sync resume %s\n", s.SessionID)
 		}
 	}
