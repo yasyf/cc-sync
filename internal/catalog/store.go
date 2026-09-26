@@ -375,8 +375,9 @@ func (s *Store) Fence(change syncservice.ChangeEnvelope) (syncservice.FenceDecis
 	return syncservice.Fence(st.receipt(change.Origin), change)
 }
 
-// Unverified returns the unexpired checkpoints of the relayed blocks that
-// applying p would hold and that are not yet ready here. It refuses p with
+// Unverified returns the unexpired relayed checkpoints p carries that
+// applying p leaves held here and not yet ready, whether their block is
+// admitted or older than its origin's fence. It refuses p with
 // ErrOriginBlockConflict exactly when Apply would.
 func (s *Store) Unverified(p Payload) ([]Checkpoint, error) {
 	st, err := s.read()
@@ -387,7 +388,13 @@ func (s *Store) Unverified(p Payload) ([]Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	return st.unready(admitted, s.now().UTC()), nil
+	now := s.now().UTC()
+	for _, in := range admitted {
+		if err := st.hold(in, now); err != nil {
+			return nil, err
+		}
+	}
+	return slices.DeleteFunc(st.carriedHeld(p, now), func(cp Checkpoint) bool { return st.Readiness[cp.ID].Ready }), nil
 }
 
 // Pending returns every unexpired held relayed checkpoint not yet ready
@@ -402,20 +409,21 @@ func (s *Store) Pending() ([]Checkpoint, error) {
 }
 
 // Apply merges p, the decoded payload of change, under the change's fence.
-// Per relayed origin, a block older than its fence is ignored, a newer one
-// replaces the held block verbatim, and an equal one must match the fenced
-// digest or the change is refused with ErrOriginBlockConflict and nothing is
-// recorded. A newer block whose checkpoints and tombstones have all expired
-// by this host's clock is disposed of: fenced but never held, so none of it
-// is recorded, ready, or relayed. A held checkpoint is ready only when its
-// root closure is in ev.Roots and its code verdict, a mixed checkpoint's
-// included, is ready; a held block becomes the relayed one once every
-// unexpired root in it is closure-complete, verified or not. The change is
-// acknowledged as processed, and its receipt persisted, only when every
+// Per relayed origin, a block older than its fence never replaces the held
+// block, a newer one replaces it verbatim, and an equal one must match the
+// fenced digest or the change is refused with ErrOriginBlockConflict and
+// nothing is recorded. A newer block whose checkpoints and tombstones have
+// all expired by this host's clock is disposed of: fenced but never held, so
+// none of it is recorded, ready, or relayed. A held checkpoint is ready only
+// when its root closure is in ev.Roots and its code verdict, a mixed
+// checkpoint's included, is ready; a held block becomes the relayed one once
+// every unexpired root in it is closure-complete, verified or not. The change
+// is acknowledged as processed, and its receipt persisted, only when every
 // carried root of an unexpired checkpoint is closure-complete and every
-// unexpired held checkpoint it carries is ready, even when it held nothing;
-// otherwise the merge is kept and the result is Partial with the prior
-// receipt.
+// unexpired relayed checkpoint it carries that its origin's held block still
+// carries, a stale block's included, is ready here, even when it held
+// nothing; otherwise the merge is kept and the result is Partial with the
+// prior receipt.
 func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p Payload, ev Evidence) (syncservice.ApplyResult, error) {
 	var res syncservice.ApplyResult
 	err := s.update(ctx, func(st *state, now time.Time) (bool, error) {
@@ -448,23 +456,30 @@ func (s *Store) Apply(ctx context.Context, change syncservice.ChangeEnvelope, p 
 			if err := st.hold(in, now); err != nil {
 				return false, err
 			}
-			for _, cp := range live(in, now) {
-				r := st.Readiness[cp.ID]
-				switch v, verified := ev.Verified[cp.ID]; {
-				case r.Ready:
-				case !ev.Roots[cp.Root.Digest]:
-					r = Readiness{Missing: []string{MissingClosure}}
-				case verified:
-					r = v
-				default:
-					r = Readiness{Missing: []string{MissingCode}}
-				}
-				st.Readiness[cp.ID] = r
-				complete = complete && (r.Ready || !carried[cp.Root.Digest])
+		}
+		holding := st.carriedHeld(p, now)
+		for _, cp := range holding {
+			r := st.Readiness[cp.ID]
+			switch v, verified := ev.Verified[cp.ID]; {
+			case r.Ready:
+			case !ev.Roots[cp.Root.Digest]:
+				r = Readiness{Missing: []string{MissingClosure}}
+			case verified:
+				r = v
+			default:
+				r = Readiness{Missing: []string{MissingCode}}
 			}
-			st.promote(in.Origin, ev.Roots, now)
+			st.Readiness[cp.ID] = r
+		}
+		for _, in := range p.Origins {
+			if in.Origin != st.Self {
+				st.promote(in.Origin, ev.Roots, now)
+			}
 		}
 		st.pruneReadiness()
+		for _, cp := range holding {
+			complete = complete && (st.Readiness[cp.ID].Ready || !carried[cp.Root.Digest])
+		}
 		if !complete {
 			res = syncservice.ApplyResult{AckedRevision: syncservice.NewRevision(0), Partial: true}
 			if held != nil {
@@ -740,6 +755,22 @@ func (st *state) promote(origin string, closure map[artifact.Digest]bool, now ti
 	} else {
 		st.Relays = slices.Insert(st.Relays, i, *held)
 	}
+}
+
+func (st *state) carriedHeld(p Payload, now time.Time) []Checkpoint {
+	held := st.relayedIDs()
+	var out []Checkpoint
+	for _, in := range p.Origins {
+		if in.Origin == st.Self {
+			continue
+		}
+		for _, cp := range live(in, now) {
+			if held[cp.ID] {
+				out = append(out, cp)
+			}
+		}
+	}
+	return out
 }
 
 func (st *state) unready(blocks []Origin, now time.Time) []Checkpoint {

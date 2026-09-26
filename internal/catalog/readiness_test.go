@@ -206,3 +206,39 @@ func TestApplyDisposesCheckpointExpiredOnArrival(t *testing.T) {
 		t.Fatalf("state = %+v, want only a fence at revision %d", st, out.Payload.Origins[0].Revision)
 	}
 }
+
+func TestApplyAcksStaleOriginBlockOnlyOnceItsCheckpointsAreHeldReady(t *testing.T) {
+	a, b := newStore(t, "a", &clock{t: t0}), newStore(t, "b", &clock{t: t0})
+	x := record(t, a, "wx", point("rx", t0, t0))
+	first := export(t, a)
+	y := record(t, a, "wy", point("ry", t0.Add(time.Minute), t0.Add(time.Minute)))
+	relayed := export(t, a).Payload
+	relayed.Exporter = "c"
+	if res := applyWith(t, b, change(t, "c", 1, relayed), relayed, evidence([]Checkpoint{x, y}, []Checkpoint{y})); !res.Partial {
+		t.Fatalf("relayed apply without x's code verdict = %+v, want Partial", res)
+	}
+	stale := change(t, "a", first.Revision, first.Payload)
+	if res := applyWith(t, b, stale, first.Payload, evidence([]Checkpoint{x}, nil)); !res.Partial || res.AckedRevision != syncservice.NewRevision(0) {
+		t.Fatalf("stale apply without x's code verdict = %+v, want Partial at revision 0", res)
+	}
+	unverified, err := b.Unverified(first.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unverified) != 1 || unverified[0].ID != x.ID {
+		t.Fatalf("Unverified(stale) = %+v, want only %s", unverified, x.ID)
+	}
+	if res := applyWith(t, b, stale, first.Payload, evidence([]Checkpoint{x}, []Checkpoint{x})); res.Partial || res.AckedRevision != syncservice.NewRevision(first.Revision) {
+		t.Fatalf("stale apply with x verified = %+v, want a full ack of %d", res, first.Revision)
+	}
+	snap, err := b.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.PickupReady("a", x) {
+		t.Fatalf("x PickupReady = false after its verified stale apply")
+	}
+	if got := block(t, b, "a").Revision; got != relayed.Origins[0].Revision {
+		t.Fatalf("held block revision = %d, want the newer %d", got, relayed.Origins[0].Revision)
+	}
+}
