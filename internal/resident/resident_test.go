@@ -223,31 +223,26 @@ func TestVerifyLoopRestrictionCancelsOnlyTheFetch(t *testing.T) {
 	tests := []struct {
 		name     string
 		restrict func(*fakeMonitor)
-		within   time.Duration
 		reason   string
 	}{
 		{
 			name:     "cellular",
 			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}) },
-			within:   time.Second,
 			reason:   "local: cellular",
 		},
 		{
 			name:     "disconnected",
 			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusDisconnected}) },
-			within:   time.Second,
 			reason:   "local: disconnected",
 		},
 		{
 			name:     "unknown",
 			restrict: func(m *fakeMonitor) { m.set(netpolicy.State{Status: netpolicy.StatusUnknown}) },
-			within:   time.Second,
 			reason:   "local: unknown",
 		},
 		{
-			name:     "manual metered without a path change",
+			name:     "manual metered",
 			restrict: func(m *fakeMonitor) { m.meter(true) },
-			within:   netgate.Poll + time.Second,
 			reason:   "local: manual metered",
 		},
 	}
@@ -280,8 +275,8 @@ func TestVerifyLoopRestrictionCancelsOnlyTheFetch(t *testing.T) {
 				if !errors.As(cause, &paused) || paused.Reason != tt.reason {
 					t.Errorf("in-flight fetch cancelled with cause %v, want a pause for %q", cause, tt.reason)
 				}
-			case <-time.After(tt.within):
-				t.Fatalf("in-flight prerequisite fetch was not cancelled within %v of the restriction", tt.within)
+			case <-time.After(time.Second):
+				t.Fatal("in-flight prerequisite fetch was not cancelled within 1s of the restriction")
 			}
 			if !<-passLive {
 				t.Error("the restriction cancelled the verification pass, want only its fetch cancelled")
@@ -333,6 +328,55 @@ func TestVerifyLoopResumesWhenUnrestricted(t *testing.T) {
 	}
 }
 
+func TestVerifyLoopRetriesAFetchAClearedRestrictionCancelled(t *testing.T) {
+	monitor := newFakeMonitor(unrestricted)
+	ctx, cancel := context.WithCancel(t.Context())
+	fetching := make(chan struct{})
+	cancelled := make(chan error, 1)
+	var admissions atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- verifyLoop(ctx, monitor, time.Hour, make(chan struct{}), func(passCtx context.Context) error {
+			return netgate.Run(passCtx, monitor, func(fetchCtx context.Context) error {
+				if admissions.Add(1) > 1 {
+					return nil
+				}
+				close(fetching)
+				<-fetchCtx.Done()
+				cancelled <- context.Cause(fetchCtx)
+				return fetchCtx.Err()
+			})
+		})
+	}()
+	<-fetching
+	monitor.awaitReads(2)
+	monitor.pulseRestriction()
+	select {
+	case cause := <-cancelled:
+		var paused *netpolicy.PausedError
+		if !errors.As(cause, &paused) || paused.Reason != "local: restricted mid-fetch" {
+			t.Errorf("in-flight fetch cancelled with cause %v, want a pause for %q", cause, "local: restricted mid-fetch")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("in-flight fetch was not cancelled within 1s of a restriction that cleared before the next read")
+	}
+	deadline := time.After(time.Second)
+	for admissions.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("admissions=%d: cancelled fetch did not retry within 1s under an unrestricted network", admissions.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("verifyLoop = %v, want context.Canceled", err)
+	}
+	if n := admissions.Load(); n != 2 {
+		t.Errorf("admissions = %d, want 2", n)
+	}
+}
+
 func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -373,7 +417,7 @@ func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 			select {
 			case call := <-calls:
 				t.Fatalf("verification %d retried while the network was manually metered", call)
-			case <-time.After(netgate.Poll + 200*time.Millisecond):
+			case <-time.After(200 * time.Millisecond):
 			}
 			monitor.meter(false)
 			select {
@@ -381,8 +425,8 @@ func TestVerifyLoopResumesPromptlyWhenManualMeterClears(t *testing.T) {
 				if call != 2 {
 					t.Fatalf("resumed verification = call %d, want 2", call)
 				}
-			case <-time.After(netgate.Poll + time.Second):
-				t.Fatalf("paused verification did not resume within %v of manual metering clearing", netgate.Poll+time.Second)
+			case <-time.After(time.Second):
+				t.Fatal("paused verification did not resume within 1s of manual metering clearing")
 			}
 			cancel()
 			if err := <-done; !errors.Is(err, context.Canceled) {
@@ -495,7 +539,7 @@ func TestVerifyLoopResumesAfterConsumerDefersFetch(t *testing.T) {
 		held bool
 	}{
 		{"restriction cleared before the pass ends", false},
-		{"restriction held past the poll", true},
+		{"restriction held after the pass", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -537,14 +581,14 @@ func TestVerifyLoopResumesAfterConsumerDefersFetch(t *testing.T) {
 				t.Fatalf("admissions = %d after the restricted pass, want 0", n)
 			}
 			if tt.held {
-				time.Sleep(netgate.Poll + 200*time.Millisecond)
+				time.Sleep(200 * time.Millisecond)
 				monitor.meter(false)
 			}
-			deadline := time.After(netgate.Poll + 2*time.Second)
+			deadline := time.After(time.Second)
 			for admissions.Load() == 0 {
 				select {
 				case <-deadline:
-					t.Fatalf("admissions=%d: deferred fetch did not resume within %v of the restriction clearing", admissions.Load(), netgate.Poll+2*time.Second)
+					t.Fatalf("admissions=%d: deferred fetch did not resume within 1s of the restriction clearing", admissions.Load())
 				case <-time.After(10 * time.Millisecond):
 				}
 			}

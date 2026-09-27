@@ -116,6 +116,11 @@ func (m *fakeMonitor) meter(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.ManualMetered = on
+	if on {
+		m.state.RestrictedEpoch++
+	}
+	close(m.changed)
+	m.changed = make(chan struct{})
 }
 
 type countingPublisher struct{ n int }

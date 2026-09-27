@@ -7,30 +7,26 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"time"
 
 	"github.com/yasyf/synckit/netpolicy"
 )
 
-// Poll is how often Run re-reads the policy between path changes while a
-// fetch runs; the monitor surfaces manual override edits only on a read.
-const Poll = time.Second
-
 // Run runs fn if monitor allows bulk transfer now, under a context cancelled
 // the moment the policy turns restrictive: cellular, expensive, constrained,
-// manual metered, disconnected, or unknown. It returns a
+// manual metered, disconnected, or unknown. A restriction that began and
+// cleared between two reads of monitor cancels fn too. It returns a
 // *netpolicy.PausedError when the policy refused or interrupted fn, and fn's
 // own result otherwise.
 func Run(ctx context.Context, monitor netpolicy.Monitor, fn func(context.Context) error) error {
-	state, _ := monitor.Current()
-	if paused := blocked(state); paused != nil {
+	start, _ := monitor.Current()
+	if paused := blocked(start); paused != nil {
 		return paused
 	}
 	var watcher sync.WaitGroup
 	defer watcher.Wait()
 	fnCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	watcher.Go(func() { cancelOnRestriction(fnCtx, monitor, cancel) })
+	watcher.Go(func() { cancelOnRestriction(fnCtx, monitor, start.RestrictedEpoch, cancel) })
 	err := fn(fnCtx)
 	var paused *netpolicy.PausedError
 	if err != nil && errors.As(context.Cause(fnCtx), &paused) {
@@ -46,12 +42,10 @@ func blocked(state netpolicy.State) *netpolicy.PausedError {
 	return nil
 }
 
-func cancelOnRestriction(ctx context.Context, monitor netpolicy.Monitor, cancel context.CancelCauseFunc) {
-	poll := time.NewTicker(Poll)
-	defer poll.Stop()
+func cancelOnRestriction(ctx context.Context, monitor netpolicy.Monitor, epoch uint64, cancel context.CancelCauseFunc) {
 	for {
 		state, changed := monitor.Current()
-		if paused := blocked(state); paused != nil {
+		if paused := interrupted(state, epoch); paused != nil {
 			cancel(paused)
 			return
 		}
@@ -59,7 +53,16 @@ func cancelOnRestriction(ctx context.Context, monitor netpolicy.Monitor, cancel 
 		case <-ctx.Done():
 			return
 		case <-changed:
-		case <-poll.C:
 		}
 	}
+}
+
+func interrupted(state netpolicy.State, epoch uint64) *netpolicy.PausedError {
+	if paused := blocked(state); paused != nil {
+		return paused
+	}
+	if state.RestrictedEpoch != epoch {
+		return &netpolicy.PausedError{Reason: "local: restricted mid-fetch"}
+	}
+	return nil
 }

@@ -38,14 +38,34 @@ func (m *fakeMonitor) awaitReads(n int) {
 
 func (m *fakeMonitor) Close() error { return nil }
 
-func (m *fakeMonitor) set(state netpolicy.State, pathChange bool) {
+func (m *fakeMonitor) publish(state netpolicy.State) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state = state
-	if pathChange {
-		close(m.changed)
-		m.changed = make(chan struct{})
+	m.observe(state)
+	m.notify()
+}
+
+func (m *fakeMonitor) pulseUnread(restricted netpolicy.State, held time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleared := m.state
+	m.observe(restricted)
+	time.Sleep(held)
+	m.observe(cleared)
+	m.notify()
+}
+
+func (m *fakeMonitor) observe(state netpolicy.State) {
+	state.RestrictedEpoch = m.state.RestrictedEpoch
+	if !state.Unrestricted() {
+		state.RestrictedEpoch++
 	}
+	m.state = state
+}
+
+func (m *fakeMonitor) notify() {
+	close(m.changed)
+	m.changed = make(chan struct{})
 }
 
 func TestRun(t *testing.T) {
@@ -56,8 +76,7 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name       string
 		start      netpolicy.State
-		restrict   *netpolicy.State
-		pathChange bool
+		change     func(*fakeMonitor)
 		fnErr      error
 		wantRan    bool
 		wantReason string
@@ -65,8 +84,31 @@ func TestRun(t *testing.T) {
 	}{
 		{name: "refused while restricted", start: cellular, wantReason: "local: cellular"},
 		{name: "refused while unknown", start: netpolicy.State{}, wantReason: "local: unknown"},
-		{name: "interrupted by a path change", start: connected, restrict: &cellular, pathChange: true, wantRan: true, wantReason: "local: cellular"},
-		{name: "interrupted by a manual override edit", start: connected, restrict: &metered, wantRan: true, wantReason: "local: manual metered"},
+		{
+			name: "interrupted by a path change", start: connected,
+			change:  func(m *fakeMonitor) { m.publish(cellular) },
+			wantRan: true, wantReason: "local: cellular",
+		},
+		{
+			name: "interrupted by a manual override edit", start: connected,
+			change:  func(m *fakeMonitor) { m.publish(metered) },
+			wantRan: true, wantReason: "local: manual metered",
+		},
+		{
+			name: "interrupted by a 200ms manual metered pulse no read saw", start: connected,
+			change:  func(m *fakeMonitor) { m.pulseUnread(metered, 200*time.Millisecond) },
+			wantRan: true, wantReason: "local: restricted mid-fetch",
+		},
+		{
+			name: "interrupted by a cellular path update coalesced with an unrestricted one", start: connected,
+			change:  func(m *fakeMonitor) { m.pulseUnread(cellular, 0) },
+			wantRan: true, wantReason: "local: restricted mid-fetch",
+		},
+		{
+			name: "unrestricted path change lets the fetch finish", start: connected,
+			change:  func(m *fakeMonitor) { m.publish(connected) },
+			wantRan: true,
+		},
 		{name: "fetch error passes through", start: connected, fnErr: failed, wantRan: true, wantErr: failed},
 		{name: "allowed", start: connected, wantRan: true},
 	}
@@ -76,16 +118,16 @@ func TestRun(t *testing.T) {
 			ran := false
 			err := Run(t.Context(), monitor, func(ctx context.Context) error {
 				ran = true
-				if tt.restrict == nil {
+				if tt.change == nil {
 					return tt.fnErr
 				}
 				monitor.awaitReads(2)
-				monitor.set(*tt.restrict, tt.pathChange)
+				tt.change(monitor)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(Poll + time.Second):
-					return errors.New("fetch not cancelled after the policy turned restrictive")
+				case <-time.After(time.Second):
+					return nil
 				}
 			})
 			if ran != tt.wantRan {
