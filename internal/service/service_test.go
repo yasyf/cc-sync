@@ -3,8 +3,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -387,12 +389,21 @@ func TestDegradedDependencies(t *testing.T) {
 			}
 		}
 	}
-	if _, err := New(cfg).Status(context.Background()); cli.Classify(err) != cli.CodeUnavailable {
-		t.Errorf("status without synckitd: code %q, err %v", cli.Classify(err), err)
+	st, err := New(cfg).Status(context.Background())
+	if err != nil {
+		t.Fatalf("status without synckitd: %v", err)
+	}
+	if st.Delivery != (cli.DeliveryService{Reason: "unavailable"}) || !st.Helper.Running || st.Local.Network.Status != cli.NetworkConnected || st.Scheduler.Workers != 1 || st.Scheduler.Tiers.IdleInterval != cli.Duration(time.Hour) {
+		t.Errorf("status without synckitd: delivery %+v helper %+v network %+v scheduler %+v", st.Delivery, st.Helper, st.Local.Network, st.Scheduler)
+	}
+	for _, p := range st.Peers {
+		if p.Reachable || p.LastSeenAt != nil || p.AckedRevision != nil || p.Pause != nil {
+			t.Errorf("peer %s carries delivery state without synckitd: %+v", p.HostID, p)
+		}
 	}
 	cfg = newConfig()
 	cfg.Helper = &fakeHelper{err: ErrUnavailable}
-	st, err := New(cfg).Status(context.Background())
+	st, err = New(cfg).Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,6 +413,74 @@ func TestDegradedDependencies(t *testing.T) {
 	cfg.Orca = fakeOrca{err: errors.New("orca crashed")}
 	if _, err := New(cfg).List(context.Background(), cli.ListRequest{}); err == nil {
 		t.Error("unexpected orca failure swallowed")
+	}
+}
+
+func TestStatusDelivery(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want cli.DeliveryService
+	}{
+		{"available", nil, cli.DeliveryService{Available: true}},
+		{"not running", fmt.Errorf("%w: synckitd is not running: dial refused", ErrUnavailable), cli.DeliveryService{Reason: "unavailable: synckitd is not running: dial refused"}},
+		{"too old", ErrSynckitdTooOld, cli.DeliveryService{Reason: "synckitd too old; upgrade synckit"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newConfig()
+			cfg.Deliveries = fakeDeliveries{statuses: statuses(), err: tt.err}
+			code, stdout, stderr := run(t, New(cfg), "status", "--json")
+			if code != cli.ExitOK {
+				t.Fatalf("exit %d, stderr %q, stdout %q", code, stderr, stdout)
+			}
+			var got struct {
+				Delivery cli.DeliveryService `json:"delivery"`
+				Helper   cli.Helper          `json:"helper"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Delivery != tt.want || !got.Helper.Running {
+				t.Errorf("delivery %+v helper %+v, want %+v and a running helper", got.Delivery, got.Helper, tt.want)
+			}
+		})
+	}
+	cfg := newConfig()
+	cfg.Deliveries = fakeDeliveries{err: errors.New("decode reply: bad frame")}
+	if _, err := New(cfg).Status(context.Background()); err == nil || cli.Classify(err) != cli.CodeInternal {
+		t.Errorf("status on a delivery failure = %v, want an internal error", err)
+	}
+}
+
+type failingInstaller struct{ err error }
+
+func (f failingInstaller) Install(context.Context, cli.InstallRequest) (cli.InstallResult, error) {
+	return cli.InstallResult{}, f.err
+}
+
+func (f failingInstaller) Uninstall(context.Context, cli.UninstallRequest) (cli.UninstallResult, error) {
+	return cli.UninstallResult{}, f.err
+}
+
+func TestSynckitdTooOldIsUnavailable(t *testing.T) {
+	if !errors.Is(ErrSynckitdTooOld, ErrUnavailable) {
+		t.Fatal("ErrSynckitdTooOld does not wrap ErrUnavailable")
+	}
+	cfg := newConfig()
+	cfg.Installer = failingInstaller{err: ErrSynckitdTooOld}
+	code, stdout, _ := run(t, New(cfg), "install", "--json")
+	var got struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if code != cli.ExitUnavailable || got.Error.Code != "unavailable" || got.Error.Message != "synckitd too old; upgrade synckit" {
+		t.Errorf("exit %d error %+v, want exit %d unavailable %q", code, got.Error, cli.ExitUnavailable, "synckitd too old; upgrade synckit")
 	}
 }
 

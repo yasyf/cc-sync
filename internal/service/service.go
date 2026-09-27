@@ -23,13 +23,23 @@ import (
 // wired into this build.
 var ErrUnavailable = errors.New("unavailable")
 
+// ErrSynckitdTooOld marks a synckitd that predates the delivery rpc cc-sync
+// calls. It wraps ErrUnavailable, so commands degrade or fail as unavailable.
+var ErrSynckitdTooOld error = &unavailableError{msg: "synckitd too old; upgrade synckit"}
+
+type unavailableError struct{ msg string }
+
+func (e *unavailableError) Error() string { return e.msg }
+
+func (e *unavailableError) Unwrap() error { return ErrUnavailable }
+
 // Catalog reads the local checkpoint catalog.
 type Catalog interface {
 	Load() (catalog.Snapshot, error)
 }
 
 // Deliveries reports synckitd's per-peer delivery of one service; it wraps
-// ErrUnavailable when synckitd cannot be reached.
+// ErrUnavailable when synckitd cannot be reached or is too old to answer.
 type Deliveries interface {
 	Status(ctx context.Context, serviceID string) ([]delivery.PeerStatus, error)
 }
@@ -136,7 +146,9 @@ func (s *Service) HelperServe(ctx context.Context) error {
 }
 
 // Status reports the helper, the local network, per-peer delivery, and the
-// capture scheduler.
+// capture scheduler. An unavailable synckitd degrades the report rather than
+// failing it: delivery is marked unavailable with the reason and peers carry
+// no delivery state.
 func (s *Service) Status(ctx context.Context) (cli.StatusResult, error) {
 	reg, err := s.cfg.Mesh.Load()
 	if err != nil {
@@ -147,8 +159,12 @@ func (s *Service) Status(ctx context.Context) (cli.StatusResult, error) {
 		return cli.StatusResult{}, fmt.Errorf("read network state: %w", err)
 	}
 	statuses, err := s.cfg.Deliveries.Status(ctx, serviceID)
-	if err != nil {
-		return cli.StatusResult{}, classify(fmt.Errorf("delivery status: %w", err))
+	availability := cli.DeliveryService{Available: true}
+	switch {
+	case errors.Is(err, ErrUnavailable):
+		availability = cli.DeliveryService{Reason: err.Error()}
+	case err != nil:
+		return cli.StatusResult{}, fmt.Errorf("delivery status: %w", err)
 	}
 	tiers, err := s.cfg.Tiers()
 	if err != nil {
@@ -156,6 +172,7 @@ func (s *Service) Status(ctx context.Context) (cli.StatusResult, error) {
 	}
 	res := cli.StatusResult{
 		Local:     cli.LocalHost{Host: host(reg.Self), Network: network(local)},
+		Delivery:  availability,
 		Scheduler: cli.Scheduler{Tiers: tiers},
 	}
 	hs, err := s.cfg.Helper.Status(ctx)

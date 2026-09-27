@@ -24,6 +24,9 @@ import (
 const (
 	// DefaultBinary is where the Orca app installs its CLI shim.
 	DefaultBinary = "/usr/local/bin/orca"
+	// BinaryEnv names an orca CLI that New prefers over DefaultBinary and PATH
+	// when Options.Binary is empty.
+	BinaryEnv = "CC_SYNC_ORCA_BINARY"
 	// DefaultTimeout bounds each `orca` invocation when Options.Timeout is zero.
 	DefaultTimeout = 30 * time.Second
 	// MaxDescriptorBytes caps a compact recovery descriptor, matching Orca's
@@ -39,7 +42,8 @@ var remoteRoutingEnv = []string{"ORCA_ENVIRONMENT", "ORCA_PAIRING_CODE", "ORCA_R
 
 // Options configures a Client.
 type Options struct {
-	// Binary is an explicit path to the orca CLI; empty resolves DefaultBinary, then PATH.
+	// Binary is an explicit path to the orca CLI; empty resolves $CC_SYNC_ORCA_BINARY,
+	// then DefaultBinary, then PATH.
 	Binary string
 	// Timeout bounds each invocation; zero means DefaultTimeout.
 	Timeout time.Duration
@@ -54,7 +58,11 @@ type Client struct {
 // New resolves the orca binary to an absolute path. A missing binary is an
 // UnavailableError with ReasonNotInstalled.
 func New(opts Options) (*Client, error) {
-	binary, err := resolveBinary(opts.Binary, DefaultBinary)
+	explicit := opts.Binary
+	if explicit == "" {
+		explicit = os.Getenv(BinaryEnv)
+	}
+	binary, err := resolveBinary(explicit, DefaultBinary)
 	if err != nil {
 		return nil, err
 	}

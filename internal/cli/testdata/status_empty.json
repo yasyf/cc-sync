@@ -16,6 +16,10 @@
       "manual_metered": false
     }
   },
+  "delivery": {
+    "available": true,
+    "reason": ""
+  },
   "peers": [],
   "scheduler": {
     "queued_by_tier": {

@@ -29,10 +29,13 @@ type Runner func(ctx context.Context, name string, args ...string) error
 // ExecRunner runs the command with exec, folding its output into the error.
 func ExecRunner(ctx context.Context, name string, args ...string) error {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput() //nolint:gosec // G204: callers pass the synckitd binary and a fixed verb argv, never a shell string.
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	if err == nil {
+		return nil
 	}
-	return nil
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, msg)
+	}
+	return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 }
 
 // Manifest is the consumer manifest cc-sync registers with synckitd.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -39,6 +40,38 @@ func (r *fakeRunner) run(_ context.Context, name string, args ...string) error {
 		return errors.New(r.fail + " failed")
 	}
 	return nil
+}
+
+func TestExecRunner(t *testing.T) {
+	missing := "cc-sync-realproc-absent-binary"
+	tests := []struct {
+		name     string
+		argv     []string
+		notFound bool
+		msg      string
+	}{
+		{name: "success", argv: []string{"/bin/sh", "-c", "exit 0"}},
+		{name: "failure with output", argv: []string{"/bin/sh", "-c", "echo boom >&2; exit 3"}, msg: "/bin/sh -c echo boom >&2; exit 3: exit status 3: boom"},
+		{name: "silent failure", argv: []string{"/bin/sh", "-c", "exit 4"}, msg: "/bin/sh -c exit 4: exit status 4"},
+		{name: "missing binary", argv: []string{missing, "install"}, notFound: true, msg: missing + ` install: exec: "` + missing + `": executable file not found in $PATH`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ExecRunner(context.Background(), tt.argv[0], tt.argv[1:]...)
+			if tt.msg == "" {
+				if err != nil {
+					t.Fatalf("ExecRunner() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.msg {
+				t.Fatalf("ExecRunner() = %v, want %q", err, tt.msg)
+			}
+			if got := errors.Is(err, exec.ErrNotFound); got != tt.notFound {
+				t.Fatalf("errors.Is(%v, exec.ErrNotFound) = %t, want %t", err, got, tt.notFound)
+			}
+		})
+	}
 }
 
 func TestManifestGolden(t *testing.T) {
