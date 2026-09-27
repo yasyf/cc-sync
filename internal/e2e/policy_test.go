@@ -301,9 +301,6 @@ type wireCall struct {
 	afterFlap bool
 }
 
-// midBatchFlap flaps one host's network while the second batch.put crosses a
-// link to receiver, then records every later call and holds the first
-// capabilities call, a restarted attempt's first, until release.
 type midBatchFlap struct {
 	flapped, receiver *Host
 	flappedEpoch      uint64
