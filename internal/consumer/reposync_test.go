@@ -191,6 +191,63 @@ func TestVerifyDeferredRechecksPolicyAtTheOriginFetch(t *testing.T) {
 	}
 }
 
+func TestVerifyDeferredKeepsAnInterruptedFetchDeferredEvenWhenItsCommitsArrived(t *testing.T) {
+	f := newCheckpointFixture(t)
+	a, b := newHost(t, "a"), newHost(t, "b")
+	cp := point("r1", t0, 1)
+	cp.Root = f.root
+	recorded, err := a.catalog.Record(t.Context(), tree("w1"), cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.consumer.cfg.Verifier = f.verifier
+	if res, err := b.consumer.ApplyArtifacts(t.Context(), a.export(t), []artifact.Ref{f.root}); err != nil || !res.Partial {
+		t.Fatalf("apply = %+v, %v; want Partial", res, err)
+	}
+	b.artifacts.complete[f.root.Digest] = true
+	b.consumer.cfg.Verifier = verifierFunc(func(ctx context.Context, root artifact.Ref, gate worktree.FetchGate) (CodeVerdict, error) {
+		return f.verifier.VerifyCode(ctx, root, func(ctx context.Context, fetch func(context.Context) error) error {
+			return gate(ctx, func(ctx context.Context) error {
+				if err := fetch(ctx); err != nil {
+					return err
+				}
+				b.network.meter(true)
+				<-ctx.Done()
+				return context.Cause(ctx)
+			})
+		})
+	})
+
+	err = b.consumer.VerifyDeferred(t.Context())
+
+	var paused *netpolicy.PausedError
+	if !errors.As(err, &paused) || paused.Reason != "local: manual metered" {
+		t.Fatalf("VerifyDeferred = %v, want a pause for %q", err, "local: manual metered")
+	}
+	if got := runGit(t, f.receiver, "cat-file", "-t", f.trunkTip); got != "commit" {
+		t.Fatalf("receiver object %s type = %q after the interrupted fetch, want commit", f.trunkTip, got)
+	}
+	snap, err := b.catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := snap.ReadinessOf("a", recorded), (catalog.Readiness{Missing: []string{f.trunkTip}, Deferred: catalog.MissingPrerequisites}); !reflect.DeepEqual(got, want) {
+		t.Errorf("readiness after an interrupted fetch = %+v, want %+v", got, want)
+	}
+
+	b.network.meter(false)
+	b.consumer.cfg.Verifier = f.verifier
+	if err := b.consumer.VerifyDeferred(t.Context()); err != nil {
+		t.Fatalf("VerifyDeferred after the policy cleared: %v", err)
+	}
+	if snap, err = b.catalog.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := snap.ReadinessOf("a", recorded); !reflect.DeepEqual(got, catalog.Readiness{Ready: true}) {
+		t.Errorf("readiness once the arrived commits verify = %+v, want ready", got)
+	}
+}
+
 func TestReposyncVerifyCodeWithoutCodeGroup(t *testing.T) {
 	store, err := artifact.Open(filepath.Join(t.TempDir(), "artifacts"))
 	if err != nil {

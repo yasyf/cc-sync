@@ -230,10 +230,10 @@ func (c *Consumer) ApplyArtifacts(ctx context.Context, change syncservice.Change
 // before each fetch and cancels it once the policy turns restrictive. It then
 // publishes, so the next delivery of a waiting change can acknowledge it. A
 // fetch the policy refused or interrupted leaves its checkpoint deferred on
-// the prerequisites it still lacks, and VerifyDeferred returns the
-// *netpolicy.PausedError after publishing so the caller retries once the
-// policy allows. A ctx cancelled mid-pass records nothing and leaves every
-// checkpoint deferred as it was.
+// every prerequisite the fetch was for, even one that already arrived, and
+// VerifyDeferred returns the *netpolicy.PausedError after publishing so the
+// caller retries once the policy allows. A ctx cancelled mid-pass records
+// nothing and leaves every checkpoint deferred as it was.
 func (c *Consumer) VerifyDeferred(ctx context.Context) error {
 	pending, err := c.cfg.Catalog.Pending()
 	if err != nil {
