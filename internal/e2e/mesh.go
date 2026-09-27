@@ -95,7 +95,8 @@ type Delivery struct {
 }
 
 // Deliver exports from's catalog change and transfers its missing closure
-// to to over Link(from, to), then applies it there.
+// to to over Link(from, to), admitted under to's RestrictedEpoch as the
+// delivery starts, then applies it there.
 func (m *Mesh) Deliver(ctx context.Context, from, to string) (Delivery, error) {
 	src, dst := m.Host(from), m.Host(to)
 	local := syncservice.NewClient(transport{host: src})
@@ -110,18 +111,19 @@ func (m *Mesh) Deliver(ctx context.Context, from, to string) (Delivery, error) {
 		return Delivery{}, fmt.Errorf("bind delivery from %s: %w", from, err)
 	}
 	d := Delivery{Change: change}
+	admitted, _ := dst.Net.Current()
 	if len(change.Artifacts) > 0 {
-		if err := transfer(ctx, local, peer, src, change.Artifacts, &d); err != nil {
+		if err := transfer(ctx, local, peer, src, change.Artifacts, admitted.RestrictedEpoch, &d); err != nil {
 			return d, err
 		}
 	}
-	if d.Result, err = peer.ApplyV2(ctx, change); err != nil {
+	if d.Result, err = peer.ApplyV2(ctx, change, admitted.RestrictedEpoch); err != nil {
 		return d, fmt.Errorf("apply on %s: %w", to, err)
 	}
 	return d, nil
 }
 
-func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, roots []artifact.Ref, d *Delivery) error {
+func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, roots []artifact.Ref, admitted uint64, d *Delivery) error {
 	after := 0
 	for {
 		page, err := local.ArtifactClosure(ctx, artifact.ClosureParams{Roots: roots, After: after, Limit: artifact.MaxClosurePage})
@@ -134,7 +136,7 @@ func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, r
 		}
 		absent := map[artifact.Digest]bool{}
 		if len(digests) > 0 {
-			missing, err := peer.ArtifactHave(ctx, digests)
+			missing, err := peer.ArtifactHave(ctx, digests, admitted)
 			if err != nil {
 				return fmt.Errorf("have: %w", err)
 			}
@@ -149,7 +151,7 @@ func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, r
 				continue
 			}
 			if len(batch) == artifact.MaxBatchObjects || raw+o.Size > artifact.MaxBatchRaw {
-				if err := send(ctx, local, peer, src, batch, d); err != nil {
+				if err := send(ctx, local, peer, src, batch, admitted, d); err != nil {
 					return err
 				}
 				batch, raw = nil, 0
@@ -158,7 +160,7 @@ func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, r
 			raw += o.Size
 		}
 		if len(batch) > 0 {
-			if err := send(ctx, local, peer, src, batch, d); err != nil {
+			if err := send(ctx, local, peer, src, batch, admitted, d); err != nil {
 				return err
 			}
 		}
@@ -169,13 +171,13 @@ func transfer(ctx context.Context, local, peer *syncservice.Client, src *Host, r
 	}
 }
 
-func send(ctx context.Context, local, peer *syncservice.Client, src *Host, objects []artifact.ObjectEntry, d *Delivery) error {
+func send(ctx context.Context, local, peer *syncservice.Client, src *Host, objects []artifact.ObjectEntry, admitted uint64, d *Delivery) error {
 	batch, err := local.BatchBuild(ctx, objects)
 	if err != nil {
 		return fmt.Errorf("build batch: %w", err)
 	}
 	state, _ := src.Net.Current()
-	begin, err := peer.BatchBegin(ctx, batch, state)
+	begin, err := peer.BatchBegin(ctx, batch, state, admitted)
 	if err != nil {
 		return fmt.Errorf("begin batch: %w", err)
 	}
@@ -190,7 +192,7 @@ func send(ctx context.Context, local, peer *syncservice.Client, src *Host, objec
 		if err != nil {
 			return fmt.Errorf("read part %d: %w", index, err)
 		}
-		put, err := peer.BatchPut(ctx, batch.ID, index, data, state)
+		put, err := peer.BatchPut(ctx, batch.ID, index, data, state, admitted)
 		if err != nil {
 			return fmt.Errorf("put part %d: %w", index, err)
 		}
@@ -198,7 +200,7 @@ func send(ctx context.Context, local, peer *syncservice.Client, src *Host, objec
 			return put.Paused
 		}
 	}
-	report, err := peer.BatchCommit(ctx, batch.ID)
+	report, err := peer.BatchCommit(ctx, batch.ID, admitted)
 	if err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}

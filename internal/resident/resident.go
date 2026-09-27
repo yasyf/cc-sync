@@ -18,7 +18,6 @@ import (
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
-	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/helperruntime"
@@ -318,14 +317,12 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 func awaitPass(ctx context.Context, monitor netpolicy.Monitor, paused bool, tick <-chan time.Time, nudges <-chan struct{}) error {
 	for {
 		var changed <-chan struct{}
-		var recheck <-chan time.Time
 		if paused {
 			var state netpolicy.State
 			state, changed = monitor.Current()
 			if state.Unrestricted() {
 				return nil
 			}
-			recheck = time.After(netgate.Poll)
 		}
 		select {
 		case <-ctx.Done():
@@ -335,7 +332,6 @@ func awaitPass(ctx context.Context, monitor netpolicy.Monitor, paused bool, tick
 		case <-nudges:
 			return nil
 		case <-changed:
-		case <-recheck:
 		}
 	}
 }

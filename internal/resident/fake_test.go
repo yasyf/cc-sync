@@ -116,15 +116,34 @@ func (m *fakeMonitor) awaitReads(n int) {
 func (m *fakeMonitor) set(state netpolicy.State) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	state.RestrictedEpoch = m.state.RestrictedEpoch
+	if !state.Unrestricted() {
+		state.RestrictedEpoch++
+	}
 	m.state = state
-	close(m.changed)
-	m.changed = make(chan struct{})
+	m.notifyLocked()
 }
 
 func (m *fakeMonitor) meter(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.ManualMetered = on
+	if on {
+		m.state.RestrictedEpoch++
+	}
+	m.notifyLocked()
+}
+
+func (m *fakeMonitor) pulseRestriction() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.RestrictedEpoch++
+	m.notifyLocked()
+}
+
+func (m *fakeMonitor) notifyLocked() {
+	close(m.changed)
+	m.changed = make(chan struct{})
 }
 
 type fakeInventory struct {
