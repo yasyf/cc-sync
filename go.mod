@@ -8,7 +8,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/daemonkit v0.23.0
 	github.com/yasyf/reposync v0.30.2-0.20260927021559-a16167684fde
-	github.com/yasyf/synckit v0.39.3-0.20260927015715-4334f0dd3914
+	github.com/yasyf/synckit v0.39.3-0.20260927023451-a99d818143ea
 	golang.org/x/sync v0.21.0
 	golang.org/x/term v0.45.0
 )
