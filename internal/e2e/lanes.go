@@ -171,6 +171,24 @@ func (l *Lanes) AwaitIdle(host, peer, what string, cond func(delivery.PeerStatus
 	}
 }
 
+// CLI runs Host.CLI on h with synckitd's delivery status read from these
+// lanes instead of an empty report.
+func (l *Lanes) CLI(h *Host, args ...string) CLIResult {
+	l.t.Helper()
+	cfg := h.serviceConfig()
+	cfg.Deliveries = laneDeliveries{harness: l.harness, host: h.Name}
+	return runCLI(cfg, args)
+}
+
+type laneDeliveries struct {
+	harness *daemon.Harness
+	host    string
+}
+
+func (d laneDeliveries) Status(_ context.Context, serviceID string) ([]delivery.PeerStatus, error) {
+	return d.harness.Status(d.host, serviceID)
+}
+
 // Close stops every lane and waits for in-flight attempts to unwind.
 func (l *Lanes) Close() {
 	if l.closed {

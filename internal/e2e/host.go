@@ -72,7 +72,10 @@ func (c *Clock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// Network is a host's fake netpolicy.Monitor.
+// Network is a host's fake netpolicy.Monitor. It keeps RestrictedEpoch the
+// way synckit's Monitor does: every published state that is not
+// Unrestricted advances it, whether an OS path update or a manual metered
+// save made it so, and an unrestricted one carries it over.
 type Network struct {
 	mu      sync.Mutex
 	state   netpolicy.State
@@ -85,7 +88,7 @@ func NewNetwork(state netpolicy.State) *Network {
 }
 
 // Current returns the state observed now and a channel closed at the next
-// Set.
+// Set or Flap.
 func (n *Network) Current() (netpolicy.State, <-chan struct{}) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -94,11 +97,36 @@ func (n *Network) Current() (netpolicy.State, <-chan struct{}) {
 	return state, n.changed
 }
 
-// Set switches the network to state and wakes every watcher.
+// Set publishes state, ignoring its RestrictedEpoch, and wakes every
+// watcher.
 func (n *Network) Set(state netpolicy.State) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.publishLocked(state)
+	n.notifyLocked()
+}
+
+// Flap publishes restricted and then the current state again with no Current
+// between them, as a restriction that begins and clears between two samples:
+// the state reads as before, but under an advanced RestrictedEpoch.
+func (n *Network) Flap(restricted netpolicy.State) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cleared := n.state
+	n.publishLocked(restricted)
+	n.publishLocked(cleared)
+	n.notifyLocked()
+}
+
+func (n *Network) publishLocked(state netpolicy.State) {
+	state.RestrictedEpoch = n.state.RestrictedEpoch
+	if !state.Unrestricted() {
+		state.RestrictedEpoch++
+	}
 	n.state = state
+}
+
+func (n *Network) notifyLocked() {
 	close(n.changed)
 	n.changed = make(chan struct{})
 }

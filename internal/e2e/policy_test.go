@@ -4,15 +4,19 @@ package e2e
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yasyf/cc-sync/internal/catalog"
+	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/delivery"
@@ -86,7 +90,7 @@ func TestPolicyPausesOnEitherEndpointAndAutoResumes(t *testing.T) {
 				if err != nil {
 					t.Fatalf("net.status over the paused link: %v", err)
 				}
-				if actual, _ := b.Net.Current(); control.Unrestricted() == remote || control.Status != actual.Status {
+				if actual, _ := b.Net.Current(); control.Unrestricted() == remote || control.Status != actual.Status || control.RestrictedEpoch != actual.RestrictedEpoch {
 					t.Fatalf("net.status over the paused link = %+v, want host-b's %+v", control, actual)
 				}
 				if held := checkpointIDs(b.Catalog(), "host-a"); len(held) != 0 {
@@ -197,6 +201,275 @@ func TestPolicyReceiverRefusesMidBatch(t *testing.T) {
 	})
 	if held := checkpointIDs(b.Catalog(), "host-a"); !slices.Contains(held, cp.ID) {
 		t.Fatalf("host-b holds %v after the resume, want %s", held, cp.ID)
+	}
+}
+
+func TestPolicyRestrictionClearedBetweenSamplesRestartsTransfer(t *testing.T) {
+	endpoints := []struct {
+		name     string
+		flapped  string
+		reason   delivery.PauseReason
+		endpoint cli.Endpoint
+	}{
+		{"sender", hostA, delivery.PauseLocalRestrictedMidTransfer, cli.EndpointLocal},
+		{"receiver", hostB, delivery.PausePeerRestrictedMidTransfer, cli.EndpointPeer},
+	}
+	for _, tt := range endpoints {
+		t.Run("lanes "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newBlobWorkspace(t)
+			link := w.mesh.Link(hostA, hostB)
+			flap := flapMidBatch(t, link, w.mesh.Host(tt.flapped), w.b)
+			lanes := w.mesh.Lanes(LanesConfig{Senders: []string{hostA}, Receivers: []string{hostB}, Retry: policyRetry})
+
+			flap.awaitNextCall(t)
+			if calls := flap.callsAfter(); !slices.Equal(calls, []string{syncservice.MethodCapabilities}) {
+				t.Fatalf("calls after the flapped batch.put = %v, want only the restart's %s", calls, syncservice.MethodCapabilities)
+			}
+			paused := lanes.Status(hostA, hostB)
+			if paused.State != delivery.StatePaused || paused.PauseReason != tt.reason {
+				t.Fatalf("lane at the restart = %s/%s, want paused with %s", paused.State, paused.PauseReason, tt.reason)
+			}
+			if paused.Pending == nil || paused.AckedChangeID != "" || paused.Progress.ObjectsSent != 0 {
+				t.Fatalf("lane at the restart = %+v, want the pending change unacked with no batch committed", paused)
+			}
+			requireNothingDelivered(t, link, w.b)
+			requireStatusPause(t, lanes.CLI(w.a, "status"), hostB, tt.endpoint)
+
+			flap.release()
+			done := lanes.AwaitIdle(hostA, hostB, "restarted delivery", func(s delivery.PeerStatus) bool {
+				return s.State == delivery.StateIdle && s.AckedChangeID != ""
+			})
+			if done.AckedChangeID != paused.Pending.ChangeID || done.Pending != nil || done.PauseReason != "" {
+				t.Fatalf("after the restart: %+v, want the ACK of %s", done, paused.Pending.ChangeID)
+			}
+			requireOneAck(t, link, w.b, paused.Pending.ChangeID)
+			flap.requireAdmitted(t)
+			requireBlob(t, w)
+		})
+	}
+
+	t.Run("pump receiver", func(t *testing.T) {
+		t.Parallel()
+		w := newBlobWorkspace(t)
+		link := w.mesh.Link(hostA, hostB)
+		flap := flapMidBatch(t, link, w.b, w.b)
+
+		_, err := w.mesh.Deliver(t.Context(), hostA, hostB)
+		var refusal *artifact.PausedError
+		if !errors.As(err, &refusal) || refusal.Code != artifact.PauseReceiverRestrictedMidTransfer {
+			t.Fatalf("deliver across the flap = %v, want a %s refusal", err, artifact.PauseReceiverRestrictedMidTransfer)
+		}
+		if calls := flap.callsAfter(); len(calls) != 0 {
+			t.Fatalf("calls after the refused batch.put = %v, want none", calls)
+		}
+		requireNothingDelivered(t, link, w.b)
+
+		d := deliver(t, w.mesh, hostA, hostB)
+		requireAcked(t, d)
+		requireOneAck(t, link, w.b, d.Change.ChangeID)
+		flap.requireAdmitted(t)
+		requireBlob(t, w)
+	})
+}
+
+type blobWorkspace struct {
+	mesh *Mesh
+	a, b *Host
+	sess *Session
+	blob string
+}
+
+func newBlobWorkspace(t *testing.T) blobWorkspace {
+	t.Helper()
+	origin := NewOrigin(t, "acme/app", map[string]string{"main.go": "package main\n"})
+	mesh := NewMesh(t, NewClock(Now()))
+	w := blobWorkspace{mesh: mesh, a: mesh.Add(hostA, origin), b: mesh.Add(hostB, origin), blob: incompressible(4 << 20)}
+	src := w.a.Checkout("acme/app")
+	w.a.WriteFile(filepath.Join(src, "blob.bin"), w.blob, 0o644)
+	w.sess = w.a.WriteSession(SessionSpec{
+		Cwd: src, Branch: "main",
+		Turns: []Turn{{Human: true, Text: "vendor the blob"}, {Text: "Added blob.bin."}},
+	})
+	checkpoint(t, w.a, w.sess.ID)
+	return w
+}
+
+type wireCall struct {
+	method    string
+	admitted  string
+	afterFlap bool
+}
+
+// midBatchFlap flaps one host's network while the second batch.put crosses a
+// link to receiver, then records every later call and holds the first
+// capabilities call, a restarted attempt's first, until release.
+type midBatchFlap struct {
+	flapped, receiver *Host
+	flappedEpoch      uint64
+	receiverEpoch     uint64
+
+	mu    sync.Mutex
+	puts  int
+	done  bool
+	after []string
+	wire  []wireCall
+
+	next    chan struct{}
+	resume  chan struct{}
+	noted   sync.Once
+	held    sync.Once
+	resumed sync.Once
+}
+
+func flapMidBatch(t *testing.T, link *Link, flapped, receiver *Host) *midBatchFlap {
+	t.Helper()
+	fs, _ := flapped.Net.Current()
+	rs, _ := receiver.Net.Current()
+	f := &midBatchFlap{
+		flapped: flapped, receiver: receiver, flappedEpoch: fs.RestrictedEpoch, receiverEpoch: rs.RestrictedEpoch,
+		next: make(chan struct{}), resume: make(chan struct{}),
+	}
+	link.Intercept(f.intercept)
+	t.Cleanup(f.release)
+	return f
+}
+
+func (f *midBatchFlap) intercept(req *rpc.Request) error {
+	f.mu.Lock()
+	after := f.done
+	if slices.Contains(bulkMethods, req.Method) {
+		f.wire = append(f.wire, wireCall{req.Method, fmt.Sprint(req.Params[artifact.AdmittedParam]), after})
+	}
+	switch {
+	case after:
+		f.after = append(f.after, req.Method)
+	case req.Method == artifact.MethodBatchPut:
+		f.puts++
+		if f.puts == 2 {
+			f.flapped.Net.Flap(Cellular)
+			f.done = true
+		}
+	}
+	f.mu.Unlock()
+	if !after {
+		return nil
+	}
+	f.noted.Do(func() { close(f.next) })
+	if req.Method == syncservice.MethodCapabilities {
+		f.held.Do(func() { <-f.resume })
+	}
+	return nil
+}
+
+func (f *midBatchFlap) awaitNextCall(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.next:
+	case <-time.After(laneWait):
+		t.Fatalf("no call crossed the link after the flap on %s", f.flapped.Name)
+	}
+}
+
+func (f *midBatchFlap) callsAfter() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.after)
+}
+
+func (f *midBatchFlap) release() {
+	f.resumed.Do(func() { close(f.resume) })
+}
+
+func (f *midBatchFlap) requireAdmitted(t *testing.T) {
+	t.Helper()
+	if state, _ := f.flapped.Net.Current(); !state.Unrestricted() || state.RestrictedEpoch != f.flappedEpoch+1 {
+		t.Fatalf("%s's network after the flap = %+v, want unrestricted at epoch %d", f.flapped.Name, state, f.flappedEpoch+1)
+	}
+	stale, fresh := fmt.Sprint(f.receiverEpoch), fmt.Sprint(f.receiverEpoch)
+	if f.flapped == f.receiver {
+		fresh = fmt.Sprint(f.receiverEpoch + 1)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.ContainsFunc(f.wire, func(c wireCall) bool { return c.afterFlap }) {
+		t.Fatalf("bulk calls %+v, want some after the flap", f.wire)
+	}
+	for i, c := range f.wire {
+		want := stale
+		if c.afterFlap {
+			want = fresh
+		}
+		if c.admitted != want {
+			t.Fatalf("bulk call %d (%s, after the flap %t) carried admitted %s, want %s; calls %+v", i, c.method, c.afterFlap, c.admitted, want, f.wire)
+		}
+	}
+}
+
+func requireNothingDelivered(t *testing.T, link *Link, b *Host) {
+	t.Helper()
+	for _, m := range []string{artifact.MethodBatchCommit, syncservice.MethodApplyV2} {
+		if n := link.Calls(m); n != 0 {
+			t.Fatalf("%s ran %d times past the pause", m, n)
+		}
+	}
+	if r, ok := b.Receipts()[hostA]; ok {
+		t.Fatalf("%s recorded receipt %+v for %s past the pause", b.Name, r, hostA)
+	}
+	if held := checkpointIDs(b.Catalog(), hostA); len(held) != 0 {
+		t.Fatalf("%s holds %v from %s past the pause", b.Name, held, hostA)
+	}
+}
+
+type statusPeer struct {
+	HostID          string  `json:"host_id"`
+	AckedRevision   *uint64 `json:"acked_revision"`
+	PendingRevision *uint64 `json:"pending_revision"`
+	Pause           *struct {
+		Reason   cli.PauseReason `json:"reason"`
+		Endpoint cli.Endpoint    `json:"endpoint"`
+	} `json:"pause"`
+}
+
+func requireStatusPause(t *testing.T, res CLIResult, peer string, endpoint cli.Endpoint) {
+	t.Helper()
+	if res.Code != 0 {
+		t.Fatalf("cc-sync status exited %d: %s%s", res.Code, res.Stdout, res.Stderr)
+	}
+	var doc struct {
+		Peers []statusPeer `json:"peers"`
+	}
+	if err := res.Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(doc.Peers, func(p statusPeer) bool { return p.HostID == peer })
+	if i < 0 {
+		t.Fatalf("cc-sync status lists no peer %s: %s", peer, res.Stdout)
+	}
+	p := doc.Peers[i]
+	if p.Pause == nil || p.Pause.Reason != cli.PauseRestrictedMidTransfer || p.Pause.Endpoint != endpoint || p.PendingRevision == nil || p.AckedRevision != nil {
+		t.Fatalf("cc-sync status = %s, want peer %s paused %s (%s) with a pending revision and none acked", res.Stdout, peer, cli.PauseRestrictedMidTransfer, endpoint)
+	}
+}
+
+func requireOneAck(t *testing.T, link *Link, b *Host, changeID string) {
+	t.Helper()
+	for _, m := range []string{artifact.MethodBatchCommit, syncservice.MethodApplyV2} {
+		if n := link.Calls(m); n != 1 {
+			t.Fatalf("%s ran %d times, want exactly once", m, n)
+		}
+	}
+	if r := b.Receipts()[hostA]; r.ChangeID != changeID {
+		t.Fatalf("%s receipt for %s = %+v, want change %s", b.Name, hostA, r, changeID)
+	}
+}
+
+func requireBlob(t *testing.T, w blobWorkspace) {
+	t.Helper()
+	res := w.b.Pickup(hostA + ":" + w.sess.ID)
+	if got := readFile(t, filepath.Join(res.Checkout.Path, "blob.bin")); got != w.blob {
+		t.Fatalf("%s restored blob.bin of %d bytes (sha256 %s), want the source's %d bytes (sha256 %s)",
+			w.b.Name, len(got), sha256Hex(got), len(w.blob), sha256Hex(w.blob))
 	}
 }
 

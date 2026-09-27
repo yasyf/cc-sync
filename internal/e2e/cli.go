@@ -69,8 +69,12 @@ func (r CLIResult) Decode(v any) error {
 // this host with --json appended.
 func (h *Host) CLI(args ...string) CLIResult {
 	h.t.Helper()
+	return runCLI(h.serviceConfig(), args)
+}
+
+func runCLI(cfg service.Config, args []string) CLIResult {
 	var stdout, stderr bytes.Buffer
-	code := cli.Execute(service.New(h.serviceConfig()), append(args, "--json"), &stdout, &stderr)
+	code := cli.Execute(service.New(cfg), append(args, "--json"), &stdout, &stderr)
 	return CLIResult{Code: code, Stdout: stdout.Bytes(), Stderr: stderr.String()}
 }
 
