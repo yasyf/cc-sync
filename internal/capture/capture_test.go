@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -157,6 +159,54 @@ func TestCaptureRecordsCheckpoint(t *testing.T) {
 	}
 	if h.publisher.kicks != 1 {
 		t.Fatalf("publisher kicks = %d, want 1", h.publisher.kicks)
+	}
+}
+
+func TestCaptureChecksReferencesIntoUndiscoveredSidecars(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		present []string
+		missing []string
+	}{
+		{
+			name:    "tool result under an absent session dir",
+			line:    `{"type":"user","toolUseResult":"Full output saved to: {{SESSION_DIR}}/tool-results/gone.txt"}`,
+			missing: []string{"session/tool-results/gone.txt"},
+		},
+		{
+			name:    "backup under an absent file history",
+			line:    `{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"/a.go":{"backupFileName":"abc@v1"}}}}`,
+			missing: []string{"file-history/abc@v1"},
+		},
+		{
+			name:    "tool result the inventory had not seen",
+			line:    `{"type":"user","toolUseResult":"Full output saved to: {{SESSION_DIR}}/tool-results/late.txt"}`,
+			present: []string{"tool-results/late.txt"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			s := h.sessions[0]
+			sessionDir := strings.TrimSuffix(s.TranscriptPath, ".jsonl")
+			appendTranscript(t, s, strings.ReplaceAll(tt.line, "{{SESSION_DIR}}", sessionDir)+"\n")
+			for _, rel := range tt.present {
+				path := filepath.Join(sessionDir, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("spilled"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.capture(t)
+			got := h.catalog.last(t).cp.Completeness
+			want := catalog.Completeness{Complete: len(tt.missing) == 0, Missing: named("session:"+sidA+":missing:", tt.missing)}
+			if got.Complete != want.Complete || !slices.Equal(got.Missing, want.Missing) {
+				t.Fatalf("completeness = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 

@@ -31,10 +31,12 @@ type Store interface {
 }
 
 // Source is one session's native paths and metadata, filled by the capture
-// job from the claudenative inventory. TaskListDirs, PlanFiles, PasteFiles,
-// and ScratchpadDir are the items the session references; each one absent at
-// the source is reported in Completeness.Missing. CapturedAt stamps a
-// manifest whose content changed.
+// job from the claudenative inventory. SessionDir and FileHistoryDir are the
+// session's own sidecar dirs whether or not they exist, so a transcript
+// reference into either that is absent at the source is reported in
+// Completeness.Missing. TaskListDirs, PlanFiles, PasteFiles, and ScratchpadDir
+// are the items the session references; each one absent at the source is
+// reported there too. CapturedAt stamps a manifest whose content changed.
 type Source struct {
 	SessionID      string
 	SourceHost     string
@@ -154,15 +156,12 @@ func (c *capturer) transcript(ctx context.Context) error {
 }
 
 func (c *capturer) trees() ([]tree, error) {
-	var trees []tree
-	for _, t := range []tree{
+	trees := []tree{
 		{root: RootSession, base: c.src.SessionDir, start: "."},
 		{root: RootFileHistory, base: c.src.FileHistoryDir, start: "."},
-		{root: RootScratchpad, base: c.src.ScratchpadDir, start: ".", required: true},
-	} {
-		if t.base != "" {
-			trees = append(trees, t)
-		}
+	}
+	if c.src.ScratchpadDir != "" {
+		trees = append(trees, tree{root: RootScratchpad, base: c.src.ScratchpadDir, start: ".", required: true})
 	}
 	for _, items := range []struct {
 		root  Root
@@ -315,12 +314,7 @@ func (c *capturer) read(ctx context.Context, root *os.Root, r Root, p string) (E
 }
 
 func (c *capturer) scanner() *referenceScanner {
-	s := &referenceScanner{found: map[string]struct{}{}}
-	if c.src.SessionDir != "" {
-		s.toolResults = []byte(c.src.SessionDir + "/tool-results/")
-	}
-	s.fileHistory = c.src.FileHistoryDir != ""
-	return s
+	return &referenceScanner{toolResults: []byte(c.src.SessionDir + "/tool-results/"), found: map[string]struct{}{}}
 }
 
 func (c *capturer) manifest() Manifest {
@@ -442,7 +436,6 @@ func lastNewline(f io.ReaderAt, size int64) (int64, error) {
 
 type referenceScanner struct {
 	toolResults []byte
-	fileHistory bool
 	line        []byte
 	found       map[string]struct{}
 }
@@ -467,12 +460,8 @@ func (s *referenceScanner) Write(p []byte) (int, error) {
 }
 
 func (s *referenceScanner) scan(line []byte) {
-	if len(s.toolResults) > 0 {
-		s.collect(line, s.toolResults, string(RootSession)+"/tool-results/", isPathByte)
-	}
-	if s.fileHistory {
-		s.collect(line, backupFileNameMarker, string(RootFileHistory)+"/", func(b byte) bool { return b != '"' })
-	}
+	s.collect(line, s.toolResults, string(RootSession)+"/tool-results/", isPathByte)
+	s.collect(line, backupFileNameMarker, string(RootFileHistory)+"/", func(b byte) bool { return b != '"' })
 }
 
 func (s *referenceScanner) collect(line, marker []byte, prefix string, keep func(byte) bool) {

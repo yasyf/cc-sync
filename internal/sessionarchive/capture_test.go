@@ -418,6 +418,25 @@ func TestCaptureReportsMissingReferences(t *testing.T) {
 	}
 }
 
+func TestCaptureReportsReferencesIntoAbsentSidecarDirs(t *testing.T) {
+	n := newNative(t, "-Users-me-src-repo")
+	lines := []string{
+		fmt.Sprintf(`{"type":"user","toolUseResult":"Full output saved to: %s/tool-results/gone.txt"}`, n.src.SessionDir),
+		`{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"/a.go":{"backupFileName":"abc@v1"}}}}`,
+	}
+	n.write(t, n.src.TranscriptPath, strings.Join(lines, "\n")+"\n")
+
+	a := capture(t, n.src, nil, newFakeStore())
+
+	want := []string{"file-history/abc@v1", "session/tool-results/gone.txt"}
+	if got := a.Manifest.Completeness.Missing; !slices.Equal(got, want) {
+		t.Errorf("missing\n got %q\nwant %q", got, want)
+	}
+	if got := keys(a); !slices.Equal(got, []string{"transcript/" + sid + ".jsonl"}) {
+		t.Errorf("entries = %q, want only the transcript", got)
+	}
+}
+
 func TestCaptureChunksLargeTranscriptWithPrefixReuse(t *testing.T) {
 	n := newNative(t, "-Users-me-src-repo")
 	line := `{"type":"assistant","pad":"` + strings.Repeat("x", 1000) + `"}` + "\n"

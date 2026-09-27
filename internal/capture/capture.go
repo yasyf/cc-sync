@@ -429,6 +429,8 @@ func (j *Job) source(s claudenative.Session, now time.Time) sessionarchive.Sourc
 		ConfigDir:      config,
 		ProjectDirName: s.ProjectDirName,
 		TranscriptPath: s.TranscriptPath,
+		SessionDir:     strings.TrimSuffix(s.TranscriptPath, ".jsonl"),
+		FileHistoryDir: filepath.Join(config, "file-history", string(s.ID)),
 		PlanFiles:      s.Sidecars.Plans,
 		ScratchpadDir:  s.Sidecars.Scratchpad,
 		Cwd:            s.Cwd,
@@ -439,12 +441,6 @@ func (j *Job) source(s claudenative.Session, now time.Time) sessionarchive.Sourc
 		LastHuman:      s.LastHumanInput,
 		LastAutonomous: s.LastAutonomousActivity,
 		CapturedAt:     now,
-	}
-	if s.Sidecars.SessionDir {
-		src.SessionDir = strings.TrimSuffix(s.TranscriptPath, ".jsonl")
-	}
-	if s.Sidecars.FileHistory {
-		src.FileHistoryDir = filepath.Join(config, "file-history", string(s.ID))
 	}
 	for _, list := range s.Sidecars.TaskLists {
 		src.TaskListDirs = append(src.TaskListDirs, filepath.Join(config, "tasks", list))
