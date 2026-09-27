@@ -18,20 +18,22 @@ type pauseCause struct {
 }
 
 var pauseCauses = map[delivery.PauseReason]pauseCause{
-	delivery.PauseLocalDisconnected:  {cli.PauseDisconnected, cli.EndpointLocal},
-	delivery.PauseLocalUnknown:       {cli.PauseUnknownNetwork, cli.EndpointLocal},
-	delivery.PauseLocalCellular:      {cli.PauseCellular, cli.EndpointLocal},
-	delivery.PauseLocalExpensive:     {cli.PauseExpensive, cli.EndpointLocal},
-	delivery.PauseLocalConstrained:   {cli.PauseConstrained, cli.EndpointLocal},
-	delivery.PauseLocalManualMetered: {cli.PauseManualMetered, cli.EndpointLocal},
-	delivery.PausePeerDisconnected:   {cli.PauseDisconnected, cli.EndpointPeer},
-	delivery.PausePeerUnknown:        {cli.PauseUnknownNetwork, cli.EndpointPeer},
-	delivery.PausePeerCellular:       {cli.PauseCellular, cli.EndpointPeer},
-	delivery.PausePeerExpensive:      {cli.PauseExpensive, cli.EndpointPeer},
-	delivery.PausePeerConstrained:    {cli.PauseConstrained, cli.EndpointPeer},
-	delivery.PausePeerManualMetered:  {cli.PauseManualMetered, cli.EndpointPeer},
-	delivery.PausePeerUnreachable:    {cli.PausePeerOffline, cli.EndpointPeer},
-	delivery.PausePeerIncompatible:   {cli.PauseIncompatible, cli.EndpointPeer},
+	delivery.PauseLocalDisconnected:          {cli.PauseDisconnected, cli.EndpointLocal},
+	delivery.PauseLocalUnknown:               {cli.PauseUnknownNetwork, cli.EndpointLocal},
+	delivery.PauseLocalCellular:              {cli.PauseCellular, cli.EndpointLocal},
+	delivery.PauseLocalExpensive:             {cli.PauseExpensive, cli.EndpointLocal},
+	delivery.PauseLocalConstrained:           {cli.PauseConstrained, cli.EndpointLocal},
+	delivery.PauseLocalManualMetered:         {cli.PauseManualMetered, cli.EndpointLocal},
+	delivery.PauseLocalRestrictedMidTransfer: {cli.PauseRestrictedMidTransfer, cli.EndpointLocal},
+	delivery.PausePeerDisconnected:           {cli.PauseDisconnected, cli.EndpointPeer},
+	delivery.PausePeerUnknown:                {cli.PauseUnknownNetwork, cli.EndpointPeer},
+	delivery.PausePeerCellular:               {cli.PauseCellular, cli.EndpointPeer},
+	delivery.PausePeerExpensive:              {cli.PauseExpensive, cli.EndpointPeer},
+	delivery.PausePeerConstrained:            {cli.PauseConstrained, cli.EndpointPeer},
+	delivery.PausePeerManualMetered:          {cli.PauseManualMetered, cli.EndpointPeer},
+	delivery.PausePeerRestrictedMidTransfer:  {cli.PauseRestrictedMidTransfer, cli.EndpointPeer},
+	delivery.PausePeerUnreachable:            {cli.PausePeerOffline, cli.EndpointPeer},
+	delivery.PausePeerIncompatible:           {cli.PauseIncompatible, cli.EndpointPeer},
 }
 
 func pauseFor(reason delivery.PauseReason, since time.Time) (*cli.Pause, error) {

@@ -69,14 +69,15 @@ type PauseReason string
 
 // PauseReason values.
 const (
-	PauseCellular       PauseReason = "cellular"
-	PauseExpensive      PauseReason = "expensive"
-	PauseConstrained    PauseReason = "constrained"
-	PauseUnknownNetwork PauseReason = "unknown-network"
-	PauseDisconnected   PauseReason = "disconnected"
-	PauseManualMetered  PauseReason = "manual-metered"
-	PausePeerOffline    PauseReason = "peer-offline"
-	PauseIncompatible   PauseReason = "incompatible"
+	PauseCellular              PauseReason = "cellular"
+	PauseExpensive             PauseReason = "expensive"
+	PauseConstrained           PauseReason = "constrained"
+	PauseUnknownNetwork        PauseReason = "unknown-network"
+	PauseDisconnected          PauseReason = "disconnected"
+	PauseManualMetered         PauseReason = "manual-metered"
+	PausePeerOffline           PauseReason = "peer-offline"
+	PauseIncompatible          PauseReason = "incompatible"
+	PauseRestrictedMidTransfer PauseReason = "restricted-mid-transfer"
 )
 
 // Endpoint names which side of a transfer imposed a pause.

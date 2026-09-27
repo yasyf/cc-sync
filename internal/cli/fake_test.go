@@ -273,6 +273,31 @@ func fullStatus() cli.StatusResult {
 	}
 }
 
+func restrictedStatus() cli.StatusResult {
+	res := fullStatus()
+	res.Local.Network = cli.Network{Status: cli.NetworkConnected}
+	res.Peers = []cli.Peer{
+		{
+			Host:            cli.Host{HostID: "host-mbp", HostName: "mbp"},
+			Reachable:       true,
+			LastSeenAt:      tsp(12, 5),
+			AckedRevision:   ptr(uint64(41)),
+			PendingRevision: ptr(uint64(42)),
+			PendingSince:    tsp(12, 1),
+			Pause:           &cli.Pause{Reason: cli.PauseRestrictedMidTransfer, Endpoint: cli.EndpointLocal, Since: ts(12, 4)},
+		},
+		{
+			Host:            cli.Host{HostID: "host-mini", HostName: "mini"},
+			Reachable:       true,
+			LastSeenAt:      tsp(12, 6),
+			PendingRevision: ptr(uint64(42)),
+			PendingSince:    tsp(12, 1),
+			Pause:           &cli.Pause{Reason: cli.PauseRestrictedMidTransfer, Endpoint: cli.EndpointPeer, Since: ts(12, 6)},
+		},
+	}
+	return res
+}
+
 func degradedStatus() cli.StatusResult {
 	res := fullStatus()
 	res.Delivery = cli.DeliveryService{Reason: "synckitd too old; upgrade synckit"}
