@@ -7,18 +7,15 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -32,8 +29,30 @@ jobs:
       - name: Build
         run: go build ./...
 
+  e2e:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install git-lfs
+        run: brew install git-lfs && git lfs install
+      - name: Test (e2e, race)
+        env:
+          GOWORK: "off"
+        run: go test -tags e2e -race -count=1 -timeout 15m ./internal/e2e/
+
+  # synckit and daemonkit compile only on darwin, so the analysis jobs
+  # cross-target darwin from ubuntu instead of billing macOS minutes.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -47,6 +66,10 @@ jobs:
 
   vuln:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -55,5 +78,5 @@ jobs:
           cache: true
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOOS='' GOARCH='' go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...

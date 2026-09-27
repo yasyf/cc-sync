@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "ok": true,
+  "checkpoint": {
+    "id": "",
+    "captured_at": "0001-01-01T00:00:00Z",
+    "partial": false
+  },
+  "checkout": {
+    "path": "",
+    "branch": null,
+    "reused": false,
+    "newer": false,
+    "lfs_pending": [],
+    "exact": false,
+    "differences": [],
+    "sparse": null
+  },
+  "sessions": [],
+  "orca": {
+    "execution_host_id": "local",
+    "worktree_id": "orca-wt-9",
+    "resumed": [],
+    "dormant": []
+  }
+}

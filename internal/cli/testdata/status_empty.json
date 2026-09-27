@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "ok": true,
+  "helper": {
+    "running": false,
+    "build": ""
+  },
+  "local": {
+    "host_id": "",
+    "host_name": "",
+    "network": {
+      "status": "unknown",
+      "expensive": false,
+      "constrained": false,
+      "cellular": false,
+      "manual_metered": false
+    }
+  },
+  "delivery": {
+    "available": true,
+    "reason": ""
+  },
+  "peers": [],
+  "scheduler": {
+    "queued_by_tier": {
+      "human": 0,
+      "autonomous": 0,
+      "recent": 0,
+      "idle": 0
+    },
+    "workers": 0,
+    "last_round_at": null,
+    "tiers": {
+      "human_interval": "0s",
+      "autonomous_interval": "0s",
+      "recent_interval": "0s",
+      "idle_interval": "0s",
+      "human_window": "0s",
+      "autonomous_window": "0s",
+      "recent_window": "0s"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"version":1,"ok":false,"error":{"code":"unavailable","message":"helper installed but not ready after 20ms; run `cc-sync status` in a few seconds, or `synckitd install` again: unavailable: ccsync.status.v1: rpc transport (undispatched): daemonkit: daemon is starting"}}

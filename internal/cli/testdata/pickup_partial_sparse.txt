@@ -1,0 +1,5 @@
+checkout restored: /Users/yasyf/.cc-sync/checkouts/monorepo/host-mbp-sync-20260926-1200 on feature/sync
+partial checkpoint d00d1e55: code deferred (missing-lfs)
+sparse checkout expanded to full (patterns /web/); rerun with --apply-sparse to keep it sparse
+session 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90: restored
+resume with: cc-sync resume 0f3c9a2e-5b1d-4c8e-9a7f-2d6b8e1c4a90

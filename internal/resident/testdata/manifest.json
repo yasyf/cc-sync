@@ -1,0 +1,16 @@
+{
+  "name": "cc-sync",
+  "binary": "cc-sync",
+  "brew": "yasyf/tap/cc-sync",
+  "watch": {
+    "debounce": "2s"
+  },
+  "service": {
+    "kind": "resident",
+    "schema_fingerprint": "b6d66b09ea62e545849608934567da731bbf31286d96f86866afe77032230454"
+  },
+  "helper": {
+    "command": "helper-serve",
+    "session_type": "Aqua"
+  }
+}

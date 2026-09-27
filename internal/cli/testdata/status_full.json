@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "ok": true,
+  "helper": {
+    "running": true,
+    "build": "v0.1.0"
+  },
+  "local": {
+    "host_id": "host-air",
+    "host_name": "air",
+    "network": {
+      "status": "connected",
+      "expensive": true,
+      "constrained": false,
+      "cellular": true,
+      "manual_metered": false
+    }
+  },
+  "delivery": {
+    "available": true,
+    "reason": ""
+  },
+  "peers": [
+    {
+      "host_id": "host-mbp",
+      "host_name": "mbp",
+      "reachable": true,
+      "last_seen_at": "2026-09-26T19:05:00Z",
+      "acked_revision": 41,
+      "pending_revision": 42,
+      "pending_since": "2026-09-26T19:01:00Z",
+      "pause": {
+        "reason": "cellular",
+        "endpoint": "local",
+        "since": "2026-09-26T18:55:00Z"
+      }
+    },
+    {
+      "host_id": "host-mini",
+      "host_name": "mini",
+      "reachable": false,
+      "last_seen_at": null,
+      "acked_revision": null,
+      "pending_revision": null,
+      "pending_since": null,
+      "pause": null
+    }
+  ],
+  "scheduler": {
+    "queued_by_tier": {
+      "human": 1,
+      "autonomous": 2,
+      "recent": 3,
+      "idle": 4
+    },
+    "workers": 2,
+    "last_round_at": "2026-09-26T19:06:00Z",
+    "tiers": {
+      "human_interval": "2m0s",
+      "autonomous_interval": "5m0s",
+      "recent_interval": "15m0s",
+      "idle_interval": "1h0m0s",
+      "human_window": "15m0s",
+      "autonomous_window": "15m0s",
+      "recent_window": "1h0m0s"
+    }
+  }
+}

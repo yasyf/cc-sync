@@ -1,0 +1,7 @@
+helper: running (build v0.1.0)
+local: air (host-air), network connected, expensive, cellular
+delivery: unavailable (synckitd too old; upgrade synckit)
+peer mbp (host-mbp): delivery unknown
+peer mini (host-mini): delivery unknown
+scheduler: 2 workers, queued human=1 autonomous=2 recent=3 idle=4, last round 2026-09-26T19:06:00Z
+capture tiers: human every 2m0s within 15m0s, autonomous every 5m0s within 15m0s, recent every 15m0s within 1h0m0s, idle every 1h0m0s
