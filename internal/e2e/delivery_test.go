@@ -409,7 +409,10 @@ func TestDeliveryStaleAckCannotClearNewerPending(t *testing.T) {
 		if req.Method == syncservice.MethodApplyV2 {
 			once.Do(func() {
 				entered <- changeID(t, req)
-				<-release
+				select {
+				case <-release:
+				case <-t.Context().Done():
+				}
 			})
 		}
 		return nil

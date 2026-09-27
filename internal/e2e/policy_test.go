@@ -220,6 +220,7 @@ func TestPolicyRestrictionClearedBetweenSamplesRestartsTransfer(t *testing.T) {
 			w := newBlobWorkspace(t)
 			link := w.mesh.Link(hostA, hostB)
 			flap := flapMidBatch(t, link, w.mesh.Host(tt.flapped), w.b)
+			defer flap.release()
 			lanes := w.mesh.Lanes(LanesConfig{Senders: []string{hostA}, Receivers: []string{hostB}, Retry: policyRetry})
 
 			flap.awaitNextCall(t)
