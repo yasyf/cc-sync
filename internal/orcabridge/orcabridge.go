@@ -96,7 +96,7 @@ func executable(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve orca path %q: %w", path, err)
 	}
-	info, err := os.Stat(abs)
+	info, err := os.Stat(abs) //nolint:gosec // G703: stats the operator-chosen orca binary (CC_SYNC_ORCA_BINARY, the well-known path, or PATH) before running it.
 	if err != nil {
 		return "", &UnavailableError{Reason: ReasonNotInstalled, Detail: err.Error()}
 	}
