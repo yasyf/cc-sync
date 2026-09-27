@@ -155,7 +155,7 @@ func TestDialRoundTrip(t *testing.T) {
 	}
 }
 
-func TestInstallEndsWithItsContextWhileTheHelperIsBusy(t *testing.T) {
+func TestCallsEndWithTheirContextWhileTheHelperIsBusy(t *testing.T) {
 	home, err := os.MkdirTemp("/tmp", "ccs")
 	if err != nil {
 		t.Fatal(err)
@@ -254,4 +254,12 @@ func TestInstallEndsWithItsContextWhileTheHelperIsBusy(t *testing.T) {
 			}
 		})
 	}
+	t.Run("status cancelled mid-call", func(t *testing.T) {
+		ctx, cancel := cancelAfter(t.Context())
+		defer cancel()
+		_, err := probe.Status(ctx)
+		if errors.Is(err, service.ErrUnavailable) || cli.Classify(err) != cli.CodeCancelled {
+			t.Fatalf("Status() cancelled mid-call = %v, want %s without ErrUnavailable", err, cli.CodeCancelled)
+		}
+	})
 }

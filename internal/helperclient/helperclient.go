@@ -1,6 +1,6 @@
 // Package helperclient calls the resident cc-sync helper's ccsync.* methods
-// over its daemonkit business lane. Every failure to reach the helper wraps
-// service.ErrUnavailable.
+// over its daemonkit business lane. Every failure to reach the helper, except
+// the caller's own cancellation, wraps service.ErrUnavailable.
 package helperclient
 
 import (
@@ -96,7 +96,7 @@ func (c *Client) call(ctx context.Context, method string, params, reply any) err
 		return fmt.Errorf("%s: encode params: %w", method, err)
 	}
 	resp, err := c.caller.Call(ctx, &rpc.Request{Method: method, Params: p})
-	if te := (*rpc.TransportError)(nil); errors.As(err, &te) {
+	if te := (*rpc.TransportError)(nil); errors.As(err, &te) && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("%w: %s: %w", service.ErrUnavailable, method, err)
 	}
 	if err != nil {

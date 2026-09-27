@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"reflect"
 	"testing"
 
+	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/service"
 	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/rpc"
@@ -16,6 +18,7 @@ import (
 func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 	unknown := fmt.Errorf("%s: %w", delivery.MethodStatus, rpc.ReplyError(`unknown method "delivery.status"`))
 	notRunning := fmt.Errorf("%s: %w", delivery.MethodStatus, &rpc.TransportError{Undispatched: true, Err: errors.New("connection refused")})
+	cancelled := fmt.Errorf("%s: %w", delivery.MethodStatus, &rpc.TransportError{Undispatched: true, Err: fmt.Errorf("wire: dial: %w", context.Canceled)})
 	dispatched := fmt.Errorf("%s: %w", delivery.MethodStatus, &rpc.TransportError{Err: errors.New("connection reset")})
 	boom := fmt.Errorf("%s: %w", delivery.MethodStatus, rpc.ReplyError("boom"))
 	prefixed := fmt.Errorf("%s: %w", delivery.MethodStatus, rpc.ReplyError("unknown method 'x'"))
@@ -38,6 +41,7 @@ func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 			name: "not running", err: notRunning, unavailable: true,
 			msg: "unavailable: synckitd is not running: delivery.status: rpc transport (undispatched): connection refused",
 		},
+		{name: "caller cancelled before dispatch", err: cancelled, msg: "delivery.status: rpc transport (undispatched): wire: dial: context canceled"},
 		{name: "transport after dispatch", err: dispatched, msg: "delivery.status: rpc transport: connection reset"},
 		{name: "handler error", err: boom, msg: "delivery.status: boom"},
 		{name: "handler error sharing the frozen prefix", err: prefixed, msg: "delivery.status: unknown method 'x'"},
@@ -73,6 +77,24 @@ func TestSynckitDeliveriesClassifiesSynckitdFailures(t *testing.T) {
 				t.Fatalf("Status() error = %q, want %q", err, tt.msg)
 			}
 		})
+	}
+}
+
+func TestSynckitDeliveriesReportsCallerCancellation(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "ccs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("DAEMONKIT_HOME", home)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = synckitDeliveries{status: delivery.Status}.Status(ctx, "cc-sync")
+	if errors.Is(err, service.ErrUnavailable) {
+		t.Fatalf("Status() with a cancelled context = %v, want no ErrUnavailable", err)
+	}
+	if code := cli.Classify(err); code != cli.CodeCancelled {
+		t.Fatalf("Status() with a cancelled context = %v classified %q, want %q", err, code, cli.CodeCancelled)
 	}
 }
 

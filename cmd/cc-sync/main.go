@@ -188,6 +188,8 @@ func (d synckitDeliveries) Status(ctx context.Context, serviceID string) ([]deli
 	statuses, err := d.status(ctx, serviceID)
 	var transport *rpc.TransportError
 	switch {
+	case errors.Is(err, context.Canceled):
+		return nil, err
 	case errors.As(err, &transport) && transport.Undispatched:
 		return nil, fmt.Errorf("%w: synckitd is not running: %w", service.ErrUnavailable, err)
 	case errors.Is(err, rpc.ErrUnknownMethod):

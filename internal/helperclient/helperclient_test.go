@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -43,13 +44,15 @@ func (w *wireCaller) Close() error {
 	return nil
 }
 
-type absentCaller struct{}
-
-func (absentCaller) Call(context.Context, *rpc.Request) (*rpc.Response, error) {
-	return nil, &rpc.TransportError{Undispatched: true, Err: errors.New("dial helper: no such file or directory")}
+type failingCaller struct {
+	err error
 }
 
-func (absentCaller) Close() error { return nil }
+func (f failingCaller) Call(context.Context, *rpc.Request) (*rpc.Response, error) {
+	return nil, f.err
+}
+
+func (failingCaller) Close() error { return nil }
 
 func strict[T any](t *testing.T, params map[string]any) T {
 	t.Helper()
@@ -137,21 +140,45 @@ func TestClientCalls(t *testing.T) {
 	}
 }
 
-func TestClientHelperAbsent(t *testing.T) {
-	c := New(absentCaller{})
-	tests := []struct {
-		name string
-		call func() error
+func TestClientTransportFailures(t *testing.T) {
+	failures := []struct {
+		name        string
+		err         error
+		unavailable bool
+		prefix      string
 	}{
-		{"status", func() error { _, err := c.Status(t.Context()); return err }},
-		{"kick", func() error { _, err := c.Kick(t.Context(), nil); return err }},
-		{"pin", func() error { return c.Pin(t.Context(), "cc-sync/pickup/op", nil, 0) }},
+		{
+			name: "helper absent", unavailable: true, prefix: "unavailable: ",
+			err: &rpc.TransportError{Undispatched: true, Err: errors.New("dial helper: no such file or directory")},
+		},
+		{
+			name: "caller cancelled",
+			err:  &rpc.TransportError{Undispatched: true, Err: fmt.Errorf("wire: dial: %w", context.Canceled)},
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.call(); !errors.Is(err, service.ErrUnavailable) {
-				t.Errorf("err = %v, want ErrUnavailable", err)
-			}
-		})
+	calls := []struct {
+		name   string
+		method string
+		call   func(context.Context, *Client) error
+	}{
+		{"status", resident.MethodStatus, func(ctx context.Context, c *Client) error { _, err := c.Status(ctx); return err }},
+		{"kick", resident.MethodKick, func(ctx context.Context, c *Client) error { _, err := c.Kick(ctx, nil); return err }},
+		{"pin", resident.MethodPin, func(ctx context.Context, c *Client) error { return c.Pin(ctx, "cc-sync/pickup/op", nil, 0) }},
+	}
+	for _, f := range failures {
+		for _, call := range calls {
+			t.Run(f.name+"/"+call.name, func(t *testing.T) {
+				err := call.call(t.Context(), New(failingCaller{err: f.err}))
+				if !errors.Is(err, f.err) {
+					t.Fatalf("err = %v, want it to wrap %v", err, f.err)
+				}
+				if got := errors.Is(err, service.ErrUnavailable); got != f.unavailable {
+					t.Errorf("errors.Is(%v, ErrUnavailable) = %t, want %t", err, got, f.unavailable)
+				}
+				if want := f.prefix + call.method + ": " + f.err.Error(); err.Error() != want {
+					t.Errorf("err = %q, want %q", err, want)
+				}
+			})
+		}
 	}
 }
