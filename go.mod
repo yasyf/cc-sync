@@ -7,7 +7,7 @@ toolchain go1.26.6
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/daemonkit v0.23.0
-	github.com/yasyf/reposync v0.30.2-0.20260926233953-f804de637024
+	github.com/yasyf/reposync v0.30.2-0.20260927001205-67a2c7a3f806
 	github.com/yasyf/synckit v0.39.3-0.20260926214603-6a26bc7530e4
 	golang.org/x/sync v0.21.0
 	golang.org/x/term v0.45.0
