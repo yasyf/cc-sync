@@ -21,6 +21,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/replica"
 	"github.com/yasyf/cc-sync/internal/sessionarchive"
+	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
 )
 
@@ -89,18 +90,21 @@ func (p *fakePinner) Pin(_ context.Context, owner string, roots []artifact.Ref, 
 
 type fakeVerifier struct{ verdict consumer.CodeVerdict }
 
-func (v fakeVerifier) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
+func (v fakeVerifier) VerifyCode(context.Context, artifact.Ref, worktree.FetchGate) (consumer.CodeVerdict, error) {
 	return v.verdict, nil
 }
 
 type fakeCode struct {
 	restored Restored
 	opts     []RestoreOptions
+	gated    []bool
 	code     []artifact.Ref
 	removed  []Restored
 }
 
 func (c *fakeCode) Restore(_ context.Context, _ codesnap.Reader, code artifact.Ref, opts RestoreOptions) (Restored, error) {
+	c.gated = append(c.gated, opts.FetchLFS != nil)
+	opts.FetchLFS = nil
 	c.opts, c.code = append(c.opts, opts), append(c.code, code)
 	r := c.restored
 	if r.Path == "" {
@@ -255,9 +259,9 @@ func newWorld(t *testing.T) *world {
 		Catalog: fakeCatalog{w.snap}, Pinner: w.pinner,
 		OpenStore: func(context.Context) (Store, error) { return w.store, nil },
 		Verifier:  w.verifier, Code: w.code, Sessions: w.sessions, Orca: w.orca,
-		FetchAllowed: func() bool { return true },
-		Layout:       claudenative.Layout{ConfigDir: filepath.Join(home, ".claude"), TmpRoot: "/tmp", UID: 502},
-		Home:         home, ReplicaRoot: filepath.Join(home, "replicas"), CheckoutRoot: "/co",
+		Network: newFakeNetwork(),
+		Layout:  claudenative.Layout{ConfigDir: filepath.Join(home, ".claude"), TmpRoot: "/tmp", UID: 502},
+		Home:    home, ReplicaRoot: filepath.Join(home, "replicas"), CheckoutRoot: "/co",
 		PreferClient: "client-7", Now: func() time.Time { return now },
 	}
 	return w
@@ -313,8 +317,8 @@ func TestPickupWithOrca(t *testing.T) {
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("result = %+v\nwant %+v", res, want)
 	}
-	if want := []RestoreOptions{{Dest: dest, FetchLFS: true}}; !reflect.DeepEqual(w.code.opts, want) || w.code.code[0] != w.codeRef {
-		t.Errorf("restore = %+v of %v, want %+v of the code group", w.code.opts, w.code.code, want)
+	if want := []RestoreOptions{{Dest: dest}}; !reflect.DeepEqual(w.code.opts, want) || !reflect.DeepEqual(w.code.gated, []bool{true}) || w.code.code[0] != w.codeRef {
+		t.Errorf("restore = %+v (LFS fetch gated %v) of %v, want %+v gated by network policy of the code group", w.code.opts, w.code.gated, w.code.code, want)
 	}
 	if !reflect.DeepEqual(w.sessions.applied, []string{sidHuman, sidIdle}) {
 		t.Errorf("applied = %v, want both sessions", w.sessions.applied)

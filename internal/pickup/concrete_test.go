@@ -24,6 +24,7 @@ import (
 	"github.com/yasyf/reposync/registry"
 	"github.com/yasyf/reposync/worktree"
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/netpolicy"
 )
 
 const (
@@ -91,7 +92,7 @@ func (s targets) Target(id string) (inventory.Target, bool) {
 
 type ready struct{}
 
-func (ready) VerifyCode(context.Context, artifact.Ref, bool) (consumer.CodeVerdict, error) {
+func (ready) VerifyCode(context.Context, artifact.Ref, worktree.FetchGate) (consumer.CodeVerdict, error) {
 	return consumer.CodeVerdict{Ready: true}, nil
 }
 
@@ -221,7 +222,7 @@ func (c *concrete) config(orca pickup.Orca) pickup.Config {
 			Now:           time.Now,
 		},
 		Orca:         orca,
-		FetchAllowed: func() bool { return false },
+		Network:      offline{},
 		Layout:       claudenative.Layout{ConfigDir: filepath.Join(c.root, "dst-claude"), TmpRoot: filepath.Join(c.root, "dst-tmp"), UID: os.Getuid()},
 		Home:         filepath.Join(c.root, "dst-home"),
 		ReplicaRoot:  filepath.Join(c.root, "replicas"),
@@ -382,3 +383,11 @@ func TestPickupConcreteNoOrca(t *testing.T) {
 		t.Errorf("launch = %#v, want %#v", launch, want)
 	}
 }
+
+type offline struct{}
+
+func (offline) Current() (netpolicy.State, <-chan struct{}) {
+	return netpolicy.State{Status: netpolicy.StatusDisconnected}, nil
+}
+
+func (offline) Close() error { return nil }

@@ -18,6 +18,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/config"
 	"github.com/yasyf/cc-sync/internal/consumer"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/cc-sync/internal/scheduler"
 	"github.com/yasyf/synckit/artifact"
 	"github.com/yasyf/synckit/helperruntime"
@@ -29,7 +30,8 @@ import (
 
 const (
 	// DefaultVerifyInterval is how often the background verifier retries
-	// deferred checkpoints while network policy allows an origin fetch.
+	// deferred checkpoints; a pass the network policy paused retries as soon
+	// as the policy allows an origin fetch again.
 	DefaultVerifyInterval = 5 * time.Minute
 	// DefaultExpireInterval is how often the capture pipeline's expired
 	// partial-capture pins are dropped.
@@ -201,12 +203,12 @@ func Prepare[S Store](ctx context.Context, d *rpc.Dispatcher, deps Deps[S], stop
 	}
 	svc := &service{
 		Consumer: consumer.New(consumer.Config{
-			Catalog:      cat,
-			Publisher:    publisher,
-			Artifacts:    store,
-			Verifier:     pipeline.Verifier,
-			FetchAllowed: func() bool { return bulkAllowed(monitor) },
-			StampDir:     layout.StampDir,
+			Catalog:   cat,
+			Publisher: publisher,
+			Artifacts: store,
+			Verifier:  pipeline.Verifier,
+			Network:   monitor,
+			StampDir:  layout.StampDir,
 		}),
 		pins: &pins{path: layout.PinsPath, store: store, now: deps.Now},
 	}
@@ -293,30 +295,47 @@ func (s *service) ApplyArtifacts(ctx context.Context, change syncservice.ChangeE
 	return result, err
 }
 
-func bulkAllowed(monitor netpolicy.Monitor) bool {
-	state, _ := monitor.Current()
-	return state.Unrestricted()
-}
-
 func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Duration, nudges <-chan struct{}, verify func(context.Context) error) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		state, changed := monitor.Current()
-		if state.Unrestricted() {
-			if err := verify(ctx); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				slog.Warn("deferred verification failed", "err", err)
+		err := verify(ctx)
+		var paused *netpolicy.PausedError
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case errors.As(err, &paused):
+			slog.Info("deferred verification paused by network policy", "reason", paused.Reason)
+		case err != nil:
+			slog.Warn("deferred verification failed", "err", err)
+		}
+		if err := awaitPass(ctx, monitor, paused != nil, ticker.C, nudges); err != nil {
+			return err
+		}
+	}
+}
+
+func awaitPass(ctx context.Context, monitor netpolicy.Monitor, paused bool, tick <-chan time.Time, nudges <-chan struct{}) error {
+	for {
+		var changed <-chan struct{}
+		var recheck <-chan time.Time
+		if paused {
+			var state netpolicy.State
+			state, changed = monitor.Current()
+			if state.Unrestricted() {
+				return nil
 			}
+			recheck = time.After(netgate.Poll)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-tick:
+			return nil
 		case <-nudges:
+			return nil
 		case <-changed:
+		case <-recheck:
 		}
 	}
 }

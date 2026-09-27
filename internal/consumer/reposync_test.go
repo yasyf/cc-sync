@@ -1,9 +1,12 @@
 package consumer
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -12,8 +15,11 @@ import (
 	"github.com/yasyf/reposync/worktree"
 
 	"github.com/yasyf/cc-sync/internal/capture"
+	"github.com/yasyf/cc-sync/internal/catalog"
 	"github.com/yasyf/cc-sync/internal/codesnap"
+	"github.com/yasyf/cc-sync/internal/netgate"
 	"github.com/yasyf/synckit/artifact"
+	"github.com/yasyf/synckit/netpolicy"
 )
 
 func runGit(t *testing.T, dir string, args ...string) string {
@@ -120,7 +126,7 @@ func newCheckpointFixture(t *testing.T) checkpointFixture {
 func TestReposyncVerifyCode(t *testing.T) {
 	f := newCheckpointFixture(t)
 
-	deferred, err := f.verifier.VerifyCode(t.Context(), f.root, false)
+	deferred, err := f.verifier.VerifyCode(t.Context(), f.root, nil)
 	if err != nil {
 		t.Fatalf("VerifyCode without fetch: %v", err)
 	}
@@ -128,7 +134,7 @@ func TestReposyncVerifyCode(t *testing.T) {
 		t.Fatalf("VerifyCode without fetch = %+v, want not ready and missing trunk tip %s", deferred, f.trunkTip)
 	}
 
-	ready, err := f.verifier.VerifyCode(t.Context(), f.root, true)
+	ready, err := f.verifier.VerifyCode(t.Context(), f.root, func(ctx context.Context, fetch func(context.Context) error) error { return fetch(ctx) })
 	if err != nil {
 		t.Fatalf("VerifyCode with fetch: %v", err)
 	}
@@ -139,9 +145,49 @@ func TestReposyncVerifyCode(t *testing.T) {
 		t.Errorf("receiver object %s type = %q after the fetch, want commit", f.trunkTip, got)
 	}
 
-	again, err := f.verifier.VerifyCode(t.Context(), f.root, false)
+	again, err := f.verifier.VerifyCode(t.Context(), f.root, nil)
 	if err != nil || !again.Ready {
 		t.Errorf("VerifyCode after fetch without fetching = %+v, %v; want ready", again, err)
+	}
+}
+
+func TestVerifyDeferredRechecksPolicyAtTheOriginFetch(t *testing.T) {
+	f := newCheckpointFixture(t)
+	a, b := newHost(t, "a"), newHost(t, "b")
+	cp := point("r1", t0, 1)
+	cp.Root = f.root
+	recorded, err := a.catalog.Record(t.Context(), tree("w1"), cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.consumer.cfg.Verifier = f.verifier
+	if res, err := b.consumer.ApplyArtifacts(t.Context(), a.export(t), []artifact.Ref{f.root}); err != nil || !res.Partial {
+		t.Fatalf("apply = %+v, %v; want Partial", res, err)
+	}
+	b.artifacts.complete[f.root.Digest] = true
+	verifier, load := f.verifier, f.verifier.Registry
+	verifier.Registry = func() (registry.Registry, error) {
+		b.network.awaitReads(2)
+		b.network.meter(true)
+		return load()
+	}
+	b.consumer.cfg.Verifier = verifier
+
+	err = netgate.Run(t.Context(), b.network, b.consumer.VerifyDeferred)
+
+	if exec.CommandContext(t.Context(), "git", "-C", f.receiver, "cat-file", "-e", f.trunkTip).Run() == nil { //nolint:gosec // G204: fixed git subcommand against the test's own temp repo.
+		t.Fatal("origin fetch ran after manual metering turned on")
+	}
+	var paused *netpolicy.PausedError
+	if !errors.As(err, &paused) || paused.Reason != "local: manual metered" {
+		t.Errorf("VerifyDeferred = %v, want a pause for %q", err, "local: manual metered")
+	}
+	snap, err := b.catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := snap.ReadinessOf("a", recorded), (catalog.Readiness{Missing: []string{f.trunkTip}, Deferred: catalog.MissingPrerequisites}); !reflect.DeepEqual(got, want) {
+		t.Errorf("readiness after a policy-deferred origin fetch = %+v, want %+v", got, want)
 	}
 }
 
@@ -167,7 +213,10 @@ func TestReposyncVerifyCodeWithoutCodeGroup(t *testing.T) {
 		t.Fatal("registry loaded for a checkpoint with no code")
 		return registry.Registry{}, nil
 	}}
-	got, err := v.VerifyCode(t.Context(), root, true)
+	got, err := v.VerifyCode(t.Context(), root, func(context.Context, func(context.Context) error) error {
+		t.Error("fetch gate called for a checkpoint with no code")
+		return nil
+	})
 	if err != nil || got.Ready || !slices.Equal(got.Missing, []string{"code"}) {
 		t.Errorf("VerifyCode = %+v, %v; want not ready, missing code", got, err)
 	}

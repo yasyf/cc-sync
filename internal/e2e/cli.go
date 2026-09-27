@@ -182,11 +182,8 @@ func (h *Host) pickupConfig() pickup.Config {
 			DisplacedRoot: filepath.Join(h.Layout.Dir, "displaced"),
 			Now:           h.Clock.Now,
 		},
-		Orca: orca,
-		FetchAllowed: func() bool {
-			state, _ := h.Net.Current()
-			return state.Unrestricted()
-		},
+		Orca:         orca,
+		Network:      h.Net,
 		Layout:       h.Claude,
 		Home:         h.Home,
 		ReplicaRoot:  h.Layout.ReplicaRoot,
@@ -228,7 +225,7 @@ type codeVerifier struct {
 	reg  registry.Registry
 }
 
-func (v codeVerifier) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin bool) (_ consumer.CodeVerdict, err error) {
+func (v codeVerifier) VerifyCode(ctx context.Context, root artifact.Ref, fetchOrigin worktree.FetchGate) (_ consumer.CodeVerdict, err error) {
 	store, closeStore, err := v.open()
 	if err != nil {
 		return consumer.CodeVerdict{}, err
