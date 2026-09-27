@@ -141,12 +141,12 @@ func (a *acceptance) track(t *testing.T, configDir, sid string) {
 
 func (a *acceptance) artifactSource(t *testing.T, name string) source {
 	t.Helper()
-	s := source{cwd: a.cwd(t, filepath.Join("src", name)), host: "orchard-" + a.nonce, spill: "SPILL-END-" + a.nonce, token: "PLANTOKEN-" + a.nonce}
+	s := source{cwd: a.cwd(t, filepath.Join("src", name)), host: "orchard-" + a.nonce, spill: "TAILTOKEN-" + a.nonce, token: "PLANTOKEN-" + a.nonce}
 	var big strings.Builder
 	for i := range 400 {
 		fmt.Fprintf(&big, "row %04d %s\n", i, strings.Repeat("x", 120))
 	}
-	big.WriteString(s.spill + "\n")
+	fmt.Fprintf(&big, "row 0400 %s\n", s.spill)
 	if err := os.WriteFile(filepath.Join(s.cwd, "big.txt"), []byte(big.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
