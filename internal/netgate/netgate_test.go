@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +67,21 @@ func (m *fakeMonitor) observe(state netpolicy.State) {
 func (m *fakeMonitor) notify() {
 	close(m.changed)
 	m.changed = make(chan struct{})
+}
+
+type heldWatcher struct {
+	*fakeMonitor
+	reads   atomic.Int32
+	held    chan struct{}
+	release chan struct{}
+}
+
+func (m *heldWatcher) Current() (netpolicy.State, <-chan struct{}) {
+	if m.reads.Add(1) == 2 {
+		close(m.held)
+		<-m.release
+	}
+	return m.fakeMonitor.Current()
 }
 
 func TestRun(t *testing.T) {
@@ -133,6 +149,51 @@ func TestRun(t *testing.T) {
 			if ran != tt.wantRan {
 				t.Fatalf("fetch ran = %v, want %v", ran, tt.wantRan)
 			}
+			var paused *netpolicy.PausedError
+			switch {
+			case tt.wantReason != "":
+				if !errors.As(err, &paused) || paused.Reason != tt.wantReason {
+					t.Errorf("Run = %v, want a pause for %q", err, tt.wantReason)
+				}
+			case !errors.Is(err, tt.wantErr) || errors.As(err, &paused):
+				t.Errorf("Run = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunReconcilesAFailureBeforeTheWatcherReads(t *testing.T) {
+	connected := netpolicy.State{Status: netpolicy.StatusConnected}
+	cellular := netpolicy.State{Status: netpolicy.StatusConnected, Cellular: true}
+	failed := errors.New("fetch failed")
+	tests := []struct {
+		name         string
+		cancelParent bool
+		wantReason   string
+		wantErr      error
+	}{
+		{name: "a cleared restriction pauses the failed fetch", wantReason: "local: restricted mid-fetch"},
+		{name: "parent cancellation outranks the restriction", cancelParent: true, wantErr: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			monitor := &heldWatcher{
+				fakeMonitor: &fakeMonitor{state: connected, changed: make(chan struct{})},
+				held:        make(chan struct{}),
+				release:     make(chan struct{}),
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			err := Run(ctx, monitor, func(fnCtx context.Context) error {
+				<-monitor.held
+				context.AfterFunc(fnCtx, func() { close(monitor.release) })
+				monitor.pulseUnread(cellular, 0)
+				if tt.cancelParent {
+					cancel()
+					return fnCtx.Err()
+				}
+				return failed
+			})
 			var paused *netpolicy.PausedError
 			switch {
 			case tt.wantReason != "":

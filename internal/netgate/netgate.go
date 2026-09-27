@@ -14,9 +14,11 @@ import (
 // Run runs fn if monitor allows bulk transfer now, under a context cancelled
 // the moment the policy turns restrictive: cellular, expensive, constrained,
 // manual metered, disconnected, or unknown. A restriction that began and
-// cleared between two reads of monitor cancels fn too. It returns a
-// *netpolicy.PausedError when the policy refused or interrupted fn, and fn's
-// own result otherwise.
+// cleared between two reads of monitor cancels fn too. When fn fails, Run
+// re-reads monitor before choosing its result, so a restriction fn outran
+// still counts. It returns a *netpolicy.PausedError when the policy refused
+// or interrupted fn before ctx itself was cancelled, and fn's own result
+// otherwise.
 func Run(ctx context.Context, monitor netpolicy.Monitor, fn func(context.Context) error) error {
 	start, _ := monitor.Current()
 	if paused := blocked(start); paused != nil {
@@ -28,8 +30,15 @@ func Run(ctx context.Context, monitor netpolicy.Monitor, fn func(context.Context
 	defer cancel(nil)
 	watcher.Go(func() { cancelOnRestriction(fnCtx, monitor, start.RestrictedEpoch, cancel) })
 	err := fn(fnCtx)
+	if err == nil {
+		return nil
+	}
+	final, _ := monitor.Current()
+	if interruption := interrupted(final, start.RestrictedEpoch); interruption != nil {
+		cancel(interruption)
+	}
 	var paused *netpolicy.PausedError
-	if err != nil && errors.As(context.Cause(fnCtx), &paused) {
+	if errors.As(context.Cause(fnCtx), &paused) {
 		return paused
 	}
 	return err
