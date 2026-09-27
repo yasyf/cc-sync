@@ -93,7 +93,10 @@ type Picker interface {
 // replaces the process with argv run in dir under env, returning only on
 // failure; Tiers is the effective capture cadence. Install waits up to
 // HelperTimeout, or until its caller's deadline when that comes first, polling
-// every HelperPoll, for the helper it started to answer.
+// every HelperPoll, for the helper it started to answer. A helper call that a
+// peer rejects can still overrun the caller's deadline or cancellation during
+// daemonkit v0.23.0's GoAway teardown (observed ~1.2s, bounded by daemonkit's
+// 10s write timeout; tracked as deferred daemonkit task 3419f1a).
 type Config struct {
 	Catalog    Catalog
 	Deliveries Deliveries
