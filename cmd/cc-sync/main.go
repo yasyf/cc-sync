@@ -32,7 +32,11 @@ import (
 	"github.com/yasyf/synckit/rpc"
 )
 
-const networkSettle = time.Second
+const (
+	networkSettle = time.Second
+	helperTimeout = 15 * time.Second
+	helperPoll    = 250 * time.Millisecond
+)
 
 func main() {
 	applog.Setup()
@@ -65,13 +69,16 @@ func wiring(layout config.Layout, helper *helperclient.Client) service.Config {
 		Sessions:   localSessions,
 		Checkouts:  service.CheckoutDir{Root: layout.CheckoutRoot},
 		Helper:     helper,
-		Installer:  residentInstaller{layout: layout, helper: helper},
+		Installer:  residentInstaller{layout: layout},
 		Picker:     localPicker{layout: layout, helper: helper},
 		Serve:      func(ctx context.Context) error { return serve(ctx, layout) },
 		Tiers:      func() (cli.CaptureTiers, error) { return captureTiers(layout.ConfigPath) },
 		Environ:    term.Environ,
 		Exec:       term.Exec,
 		Now:        time.Now,
+
+		HelperTimeout: helperTimeout,
+		HelperPoll:    helperPoll,
 	}
 }
 
@@ -183,7 +190,6 @@ func (d synckitDeliveries) Status(ctx context.Context, serviceID string) ([]deli
 
 type residentInstaller struct {
 	layout config.Layout
-	helper *helperclient.Client
 }
 
 func (i residentInstaller) Install(ctx context.Context, req cli.InstallRequest) (cli.InstallResult, error) {
@@ -199,16 +205,7 @@ func (i residentInstaller) Install(ctx context.Context, req cli.InstallRequest) 
 	if err != nil {
 		return cli.InstallResult{}, synckitdMissing(err)
 	}
-	res := cli.InstallResult{ConfigDir: i.layout.Dir, Synckitd: !req.NoSynckitd}
-	status, err := i.helper.Status(ctx)
-	switch {
-	case errors.Is(err, service.ErrUnavailable):
-	case err != nil:
-		return cli.InstallResult{}, fmt.Errorf("probe helper: %w", err)
-	default:
-		res.Helper = cli.Helper{Running: true, Build: status.Build}
-	}
-	return res, nil
+	return cli.InstallResult{ConfigDir: i.layout.Dir, Synckitd: !req.NoSynckitd}, nil
 }
 
 func (i residentInstaller) Uninstall(ctx context.Context, req cli.UninstallRequest) (cli.UninstallResult, error) {

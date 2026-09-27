@@ -14,6 +14,7 @@ import (
 	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/orcabridge"
 	"github.com/yasyf/cc-sync/internal/scheduler"
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/synckit/delivery"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/netpolicy"
@@ -90,7 +91,9 @@ type Picker interface {
 // Config wires a Service to its dependencies. Network reports this host's
 // live network State; Live and Sessions read the native Claude layout; Exec
 // replaces the process with argv run in dir under env, returning only on
-// failure; Tiers is the effective capture cadence.
+// failure; Tiers is the effective capture cadence. Install waits up to
+// HelperTimeout, or until its caller's deadline when that comes first, polling
+// every HelperPoll, for the helper it started to answer.
 type Config struct {
 	Catalog    Catalog
 	Deliveries Deliveries
@@ -108,6 +111,9 @@ type Config struct {
 	Environ    []string
 	Exec       func(argv []string, dir string, env []string) error
 	Now        func() time.Time
+
+	HelperTimeout time.Duration
+	HelperPoll    time.Duration
 }
 
 // Service is cc-sync's cli.Service.
@@ -122,10 +128,73 @@ func New(cfg Config) *Service {
 	return &Service{cfg: cfg}
 }
 
-// Install delegates to the resident installer.
+// Install runs the resident installer and reports the helper. Unless
+// req.NoSynckitd, the installer has just started the helper, so Install waits
+// for it to answer and fails unavailable, naming the recovery step, when it
+// never does.
 func (s *Service) Install(ctx context.Context, req cli.InstallRequest) (cli.InstallResult, error) {
 	res, err := s.cfg.Installer.Install(ctx, req)
-	return res, classify(err)
+	if err != nil {
+		return cli.InstallResult{}, classify(err)
+	}
+	if req.NoSynckitd {
+		res.Helper, err = s.probeHelper(ctx)
+	} else {
+		res.Helper, err = s.awaitHelper(ctx)
+	}
+	if err != nil {
+		return cli.InstallResult{}, classify(err)
+	}
+	return res, nil
+}
+
+func (s *Service) probeHelper(ctx context.Context) (cli.Helper, error) {
+	hs, err := s.cfg.Helper.Status(ctx)
+	switch {
+	case errors.Is(err, ErrUnavailable):
+		return cli.Helper{}, nil
+	case err != nil:
+		return cli.Helper{}, fmt.Errorf("probe helper: %w", err)
+	}
+	return cli.Helper{Running: true, Build: hs.Build}, nil
+}
+
+func (s *Service) awaitHelper(ctx context.Context) (cli.Helper, error) {
+	started := time.Now()
+	wait, cancel := context.WithTimeout(ctx, s.cfg.HelperTimeout)
+	defer cancel()
+	poll := time.NewTimer(s.cfg.HelperPoll)
+	defer poll.Stop()
+	for {
+		hs, err := s.cfg.Helper.Status(wait)
+		if err == nil {
+			return cli.Helper{Running: true, Build: hs.Build}, nil
+		}
+		if wait.Err() == nil && !settling(err) {
+			return cli.Helper{}, fmt.Errorf("probe helper: %w", err)
+		}
+		if wait.Err() == nil {
+			poll.Reset(s.cfg.HelperPoll)
+			select {
+			case <-poll.C:
+				continue
+			case <-wait.Done():
+			}
+		}
+		waited := s.cfg.HelperTimeout
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			return cli.Helper{}, fmt.Errorf("wait for helper: %w", ctx.Err())
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			waited = time.Since(started).Round(time.Millisecond)
+		}
+		return cli.Helper{}, cli.Errorf(cli.CodeUnavailable, "helper installed but not ready after %s; run `cc-sync status` in a few seconds, or `synckitd install` again: %w", waited, err)
+	}
+}
+
+func settling(err error) bool {
+	return errors.Is(err, daemonkit.ErrAbsent) || errors.Is(err, daemonkit.ErrNotReady) ||
+		errors.Is(err, daemonkit.ErrDraining) || errors.Is(err, daemonkit.ErrPeerGone)
 }
 
 // Uninstall delegates to the resident installer.

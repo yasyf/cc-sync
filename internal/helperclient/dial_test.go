@@ -9,11 +9,13 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yasyf/daemonkit"
 
+	"github.com/yasyf/cc-sync/internal/cli"
 	"github.com/yasyf/cc-sync/internal/consumer"
 	"github.com/yasyf/cc-sync/internal/resident"
 	"github.com/yasyf/cc-sync/internal/scheduler"
@@ -27,6 +29,16 @@ type nopProduct struct{}
 
 func (nopProduct) Drain(context.Context) error { return nil }
 func (nopProduct) Close(context.Context) error { return nil }
+
+type nopInstaller struct{}
+
+func (nopInstaller) Install(context.Context, cli.InstallRequest) (cli.InstallResult, error) {
+	return cli.InstallResult{}, nil
+}
+
+func (nopInstaller) Uninstall(context.Context, cli.UninstallRequest) (cli.UninstallResult, error) {
+	return cli.UninstallResult{}, nil
+}
 
 func decode(params map[string]any, v any) error {
 	data, err := json.Marshal(params)
@@ -140,5 +152,106 @@ func TestDialRoundTrip(t *testing.T) {
 	}
 	if err := client.Pin(t.Context(), "outsider", []artifact.Ref{root}, time.Hour); err == nil || errors.Is(err, service.ErrUnavailable) {
 		t.Errorf("Pin under a foreign owner = %v, want the helper's refusal", err)
+	}
+}
+
+func TestInstallEndsWithItsContextWhileTheHelperIsBusy(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "ccs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("DAEMONKIT_HOME", home)
+
+	var busy atomic.Bool
+	release := make(chan struct{})
+	d := rpc.NewDispatcher()
+	d.Register(resident.MethodStatus, func(context.Context, map[string]any) (any, error) {
+		if busy.Load() {
+			<-release
+		}
+		return resident.StatusReply{Build: "cc-sync 1.2.3"}, nil
+	})
+	runtime, err := helperruntime.New(helperruntime.Config{
+		App:        helperruntime.App{Name: consumer.ServiceID},
+		Dispatcher: d,
+		Prepare:    func(daemonkit.Ctx) (helperruntime.Product, error) { return nopProduct{}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- runtime.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Errorf("helper run: %v", err)
+			}
+		case <-time.After(45 * time.Second):
+			t.Error("helper did not stop")
+		}
+	})
+	t.Cleanup(func() { close(release) })
+
+	probe, err := Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, err = probe.Status(t.Context())
+		if err == nil || !errors.Is(err, service.ErrUnavailable) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	busy.Store(true)
+
+	cancelAfter := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(ctx)
+		time.AfterFunc(50*time.Millisecond, cancel)
+		return ctx, cancel
+	}
+	deadlineAfter := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, 50*time.Millisecond)
+	}
+	tests := []struct {
+		name     string
+		timeout  time.Duration
+		caller   func(context.Context) (context.Context, context.CancelFunc)
+		wantCode cli.Code
+		wantErr  error
+	}{
+		{"deadline", 50 * time.Millisecond, context.WithCancel, cli.CodeUnavailable, context.DeadlineExceeded},
+		{"caller deadline", time.Minute, deadlineAfter, cli.CodeUnavailable, context.DeadlineExceeded},
+		{"cancelled", time.Minute, cancelAfter, cli.CodeCancelled, context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			helper, err := Dial()
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer func() { _ = helper.Close() }()
+			ctx, cancel := tt.caller(t.Context())
+			defer cancel()
+			svc := service.New(service.Config{Installer: nopInstaller{}, Helper: helper, HelperTimeout: tt.timeout, HelperPoll: time.Millisecond})
+			started := time.Now()
+			_, err = svc.Install(ctx, cli.InstallRequest{})
+			elapsed := time.Since(started)
+			if cli.Classify(err) != tt.wantCode || !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Install() error = %v, want %s wrapping %v", err, tt.wantCode, tt.wantErr)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("Install() returned %s after its 50ms bound while the helper stayed busy, want under 1s", elapsed)
+			}
+		})
 	}
 }
