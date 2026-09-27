@@ -30,7 +30,8 @@ import (
 
 const (
 	// DefaultVerifyInterval is how often the background verifier retries
-	// deferred checkpoints while network policy allows an origin fetch.
+	// deferred checkpoints; a pass the network policy paused retries as soon
+	// as the policy allows an origin fetch again.
 	DefaultVerifyInterval = 5 * time.Minute
 	// DefaultExpireInterval is how often the capture pipeline's expired
 	// partial-capture pins are dropped.
@@ -298,30 +299,41 @@ func verifyLoop(ctx context.Context, monitor netpolicy.Monitor, interval time.Du
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		state, changed := monitor.Current()
-		deferred := !state.Unrestricted()
-		if !deferred {
-			err := netgate.Run(ctx, monitor, verify)
-			var paused *netpolicy.PausedError
-			switch {
-			case ctx.Err() != nil:
-				return ctx.Err()
-			case errors.As(err, &paused):
-				deferred = true
-				slog.Info("deferred verification paused by network policy", "reason", paused.Reason)
-			case err != nil:
-				slog.Warn("deferred verification failed", "err", err)
-			}
+		err := verify(ctx)
+		var paused *netpolicy.PausedError
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case errors.As(err, &paused):
+			slog.Info("deferred verification paused by network policy", "reason", paused.Reason)
+		case err != nil:
+			slog.Warn("deferred verification failed", "err", err)
 		}
+		if err := awaitPass(ctx, monitor, paused != nil, ticker.C, nudges); err != nil {
+			return err
+		}
+	}
+}
+
+func awaitPass(ctx context.Context, monitor netpolicy.Monitor, paused bool, tick <-chan time.Time, nudges <-chan struct{}) error {
+	for {
+		var changed <-chan struct{}
 		var recheck <-chan time.Time
-		if deferred {
+		if paused {
+			var state netpolicy.State
+			state, changed = monitor.Current()
+			if state.Unrestricted() {
+				return nil
+			}
 			recheck = time.After(netgate.Poll)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-tick:
+			return nil
 		case <-nudges:
+			return nil
 		case <-changed:
 		case <-recheck:
 		}
