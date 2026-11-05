@@ -37,9 +37,9 @@ repos:
       # prek pins GOTOOLCHAIN=local, so an unpinned hook takes the ambient
       # `go`. Keep >= the highest go.mod `go` in any consuming repo.
       - id: golangci-lint-fmt
-        language_version: '1.26.6'
+        language_version: '1.26.10'
       - id: golangci-lint
-        language_version: '1.26.6'
+        language_version: '1.26.10'
         args: [--allow-serial-runners]
 
 # Native session fixtures assert exact bytes, including a partial last line
